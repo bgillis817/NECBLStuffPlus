@@ -1,0 +1,449 @@
+# Load all packages
+library(tidyverse)
+library(randomForest)
+library(caret)
+library(Metrics)
+library(data.table)
+library(ggplot2)
+library(googledrive)
+
+# Set up Google Drive authentication
+options(gargle_oauth_cache = ".secrets")
+drive_auth(cache = ".secrets", email = TRUE)
+
+# ==========================================
+# Data combo from drive folder
+# ==========================================
+
+combine_navs_csvs <- function(folder_path = "Navs CSVs", use_google_drive = TRUE) {
+  
+  cat("========================================\n")
+  cat("Combining CSVs\n")
+  cat("========================================\n\n")
+  
+  if (use_google_drive) {
+    # Find the folder in Google Drive
+    cat("Searching for folder:", folder_path, "\n")
+    folder <- drive_get(folder_path)
+    
+    if (nrow(folder) == 0) {
+      stop("Folder not found")
+    }
+    
+    # List all CSV files
+    cat("Finding CSVs in folder...\n")
+    files <- drive_ls(folder, pattern = "\\.csv$")
+    
+    if (nrow(files) == 0) {
+      stop("No CSV files found in the folder")
+    }
+    
+    cat("Found", nrow(files), "CSV files\n\n")
+    
+    # Create temp directory
+    temp_dir <- tempdir()
+    
+    # Download and combine all CSV files
+    all_data_list <- list()
+    
+    for (i in 1:nrow(files)) {
+      cat("Processing file", i, "of", nrow(files), ":", files$name[i], "\n")
+      
+      # Download file
+      temp_file <- file.path(temp_dir, files$name[i])
+      
+      tryCatch({
+        drive_download(files$id[i], path = temp_file, overwrite = TRUE, verbose = FALSE)
+        
+        # Use fread for reading
+        df <- data.table::fread(temp_file, 
+                                stringsAsFactors = FALSE,
+                                na.strings = c("", "NA", "N/A", "null", "NULL"),
+                                fill = TRUE)
+        
+        # Add source file
+        df$SourceFile <- files$name[i]
+        
+        all_data_list[[i]] <- df
+        
+        cat("  Loaded", nrow(df), "rows\n")
+        
+      }, error = function(e) {
+        cat("   Error loading file:", e$message, "\n")
+      })
+      
+      # Clean up
+      if (file.exists(temp_file)) {
+        unlink(temp_file)
+      }
+    }
+    
+  } else {
+    # Local file processing
+    stop("Please use Google Drive")
+  }
+  
+  # Remove NULL entries
+  all_data_list <- all_data_list[!sapply(all_data_list, is.null)]
+  
+  if (length(all_data_list) == 0) {
+    stop("No data")
+  }
+  
+  cat("\nCombining", length(all_data_list), "dataframes...\n")
+  
+  # Combine using rbindlist
+  combined_data <- data.table::rbindlist(all_data_list, 
+                                         use.names = TRUE, 
+                                         fill = TRUE,
+                                         idcol = "FileIndex")
+  
+  combined_data <- as.data.frame(combined_data)
+  
+  cat("✓ Successfully combined data\n")
+  cat("Total rows:", nrow(combined_data), "\n")
+  cat("Total columns:", ncol(combined_data), "\n\n")
+  
+  return(combined_data)
+}
+
+# ==========================================
+# Data Cleaning and such
+# ==========================================
+
+clean_all_data <- function(df) {
+  
+  cat("\n========================================\n")
+  cat("Cleaning\n")
+  cat("========================================\n\n")
+  
+  original_rows <- nrow(df)
+  
+  # Step 1: Clean PlayResult - convert StolenBase and CaughtStealing to Undefined
+  if ("PlayResult" %in% names(df)) {
+    cat("Cleaning PlayResult column:\n")
+    
+    # Count before
+    stolen_base_count <- sum(df$PlayResult == "StolenBase", na.rm = TRUE)
+    caught_stealing_count <- sum(df$PlayResult == "CaughtStealing", na.rm = TRUE)
+    
+    cat(sprintf("  • StolenBase entries: %d → converting to 'Undefined'\n", stolen_base_count))
+    cat(sprintf("  • CaughtStealing entries: %d → converting to 'Undefined'\n", caught_stealing_count))
+    
+    # Convert to Undefined
+    df$PlayResult[df$PlayResult == "StolenBase"] <- "Undefined"
+    df$PlayResult[df$PlayResult == "CaughtStealing"] <- "Undefined"
+    
+    # Also fix Sinigle typo
+    sinigle_count <- sum(df$PlayResult == "Sinigle", na.rm = TRUE)
+    if (sinigle_count > 0) {
+      df$PlayResult[df$PlayResult == "Sinigle"] <- "Single"
+      cat(sprintf("  • Fixed 'Sinigle' → 'Single': %d entries\n", sinigle_count))
+    }
+  }
+  
+  # Step 2: Clean and consolidate pitch types
+  if (all(c("TaggedPitchType", "AutoPitchType") %in% names(df))) {
+    cat("\nCleaning pitch types:\n")
+    
+    # First replace Undefined with AutoPitchType
+    undefined_count <- sum(df$TaggedPitchType == "Undefined" | 
+                           is.na(df$TaggedPitchType) | 
+                           df$TaggedPitchType == "", 
+                           na.rm = TRUE)
+    
+    cat(sprintf("  • Undefined/NA pitch types: %d → using AutoPitchType\n", undefined_count))
+    
+    df <- df %>%
+      mutate(
+        TaggedPitchType_Original = TaggedPitchType,
+        TaggedPitchType = case_when(
+          TaggedPitchType == "Undefined" ~ AutoPitchType,
+          is.na(TaggedPitchType) ~ AutoPitchType,
+          TaggedPitchType == "" ~ AutoPitchType,
+          TRUE ~ TaggedPitchType
+        )
+      )
+    
+    # Combine FourSeamFastBall and Four-Seam to Fastball
+    fourseam_fb_count <- sum(df$TaggedPitchType == "FourSeamFastBall", na.rm = TRUE)
+    fourseam_count <- sum(df$TaggedPitchType == "Four-Seam", na.rm = TRUE)
+    
+    if (fourseam_fb_count > 0 || fourseam_count > 0) {
+      cat(sprintf("\n  • Consolidating fastball variants:\n"))
+      cat(sprintf("    - FourSeamFastBall: %d entries\n", fourseam_fb_count))
+      cat(sprintf("    - Four-Seam: %d entries\n", fourseam_count))
+      
+      df$TaggedPitchType[df$TaggedPitchType == "FourSeamFastBall"] <- "Fastball"
+      df$TaggedPitchType[df$TaggedPitchType == "Four-Seam"] <- "Fastball"
+      
+      cat(sprintf("    → Combined into 'Fastball': %d total entries\n", 
+                  fourseam_fb_count + fourseam_count))
+    }
+    
+    # Combine ChangeUp and Changeup
+    changeup_cap_count <- sum(df$TaggedPitchType == "ChangeUp", na.rm = TRUE)
+    changeup_count <- sum(df$TaggedPitchType == "Changeup", na.rm = TRUE)
+    
+    if (changeup_cap_count > 0) {
+      cat(sprintf("\n  • Consolidating changeup variants:\n"))
+      cat(sprintf("    - ChangeUp: %d entries\n", changeup_cap_count))
+      cat(sprintf("    - Changeup: %d entries\n", changeup_count))
+      
+      # Standardize to "Changeup"
+      df$TaggedPitchType[df$TaggedPitchType == "ChangeUp"] <- "Changeup"
+      
+      cat(sprintf("    → Standardized to 'Changeup': %d total entries\n", 
+                  changeup_cap_count + changeup_count))
+    }
+  }
+  
+  # Step 3: Filter slow fastballs (thinking this as a general baseline for potential position player pitching, may update to include spin as well--roughly where Parks/Whitehill were when they had to throw)
+  if (all(c("TaggedPitchType", "RelSpeed") %in% names(df))) {
+    cat("\nFiltering velocity outliers:\n")
+    
+    # Count fastballs below 77 mph
+    slow_fastballs <- df %>%
+      filter(TaggedPitchType == "Fastball" & RelSpeed < 77) %>%
+      nrow()
+    
+    if (slow_fastballs > 0) {
+      cat(sprintf("  • Removing %d fastballs with RelSpeed < 77 mph\n", slow_fastballs))
+      
+      # Remove slow fastballs
+      df <- df %>%
+        filter(!(TaggedPitchType == "Fastball" & RelSpeed < 77))
+      
+      cat(sprintf("  • Rows after removal: %d\n", nrow(df)))
+    } else {
+      cat("  • No fastballs below 77 mph found\n")
+    }
+  }
+  
+  cat("\n✓ Data cleaning complete\n")
+  
+  return(df)
+}
+
+# ==========================================
+# Continue Filtering
+# ==========================================
+
+filter_core_metrics <- function(df) {
+  
+  cat("\n========================================\n")
+  cat("Filtering for velo, spin, IVB, and HB (has to include all of these rows)\n")
+  cat("========================================\n\n")
+  
+  original_rows <- nrow(df)
+  
+  # Core required columns 
+  core_required <- c("RelSpeed", "SpinRate", "InducedVertBreak", "HorzBreak")
+  
+  # Check if columns exist
+  missing_cols <- setdiff(core_required, names(df))
+  if (length(missing_cols) > 0) {
+    stop("Missing required columns: ", paste(missing_cols, collapse = ", "))
+  }
+  
+  # Show missing data in core columns
+  cat("Missing values in columns:\n")
+  for (col in core_required) {
+    na_count <- sum(is.na(df[[col]]))
+    cat(sprintf("  %-20s: %6d (%.2f%%)\n", 
+                col, na_count, na_count/original_rows*100))
+  }
+  
+  # Filter for rows with complete Velo/Spin/break metrics only
+  cat("\nFiltering for rows with complete core metrics...\n")
+  
+  df_filtered <- df %>%
+    filter(!is.na(RelSpeed),
+           !is.na(SpinRate),
+           !is.na(InducedVertBreak),
+           !is.na(HorzBreak))
+  
+  rows_removed <- original_rows - nrow(df_filtered)
+  
+  cat("\n----------------------------------------\n")
+  cat("FILTERING RESULTS:\n")
+  cat(sprintf("  Original rows:      %8d\n", original_rows))
+  cat(sprintf("  Rows removed:       %8d (%.2f%%)\n", 
+              rows_removed, rows_removed/original_rows*100))
+  cat(sprintf("  Rows retained:      %8d (%.2f%%)\n", 
+              nrow(df_filtered), nrow(df_filtered)/original_rows*100))
+  cat(sprintf("  Columns unchanged:  %8d\n", ncol(df_filtered)))
+  
+  cat("\n✓ Filtering complete - kept all columns, filtered rows\n")
+  
+  return(df_filtered)
+}
+
+# ==========================================
+# Dataquality testing
+# ==========================================
+
+assess_final_quality <- function(df) {
+  
+  cat("\n========================================\n")
+  cat("Final data quality test\n")
+  cat("========================================\n\n")
+  
+  # Basic info
+  cat("Dataset Overview:\n")
+  cat(sprintf("  Total rows:         %8d\n", nrow(df)))
+  cat(sprintf("  Total columns:      %8d\n", ncol(df)))
+  
+  if ("PitcherId" %in% names(df)) {
+    cat(sprintf("  Unique pitchers:    %8d\n", n_distinct(df$PitcherId)))
+  }
+  
+  if ("GameID" %in% names(df)) {
+    cat(sprintf("  Unique games:       %8d\n", n_distinct(df$GameID)))
+  }
+  
+  # Core metrics completeness
+  cat("\nCore Metrics Status (100% complete):\n")
+  core_metrics <- c("RelSpeed", "SpinRate", "InducedVertBreak", "HorzBreak")
+  for (metric in core_metrics) {
+    if (metric %in% names(df)) {
+      complete_pct = sum(!is.na(df[[metric]])) / nrow(df) * 100
+      cat(sprintf("  %-20s: %.1f%% complete\n", metric, complete_pct))
+    }
+  }
+  
+  # Other columns may have missing data
+  cat("\nOther Column Completeness (sample):\n")
+  other_cols <- c("PlateLocHeight", "PlateLocSide", "Extension", "RelHeight", "RelSide")
+  for (col in other_cols) {
+    if (col %in% names(df)) {
+      complete_pct = sum(!is.na(df[[col]])) / nrow(df) * 100
+      cat(sprintf("  %-20s: %.1f%% complete\n", col, complete_pct))
+    }
+  }
+  
+  # Pitch type distribution
+  if ("TaggedPitchType" %in% names(df)) {
+    cat("\nPitch Type Distribution:\n")
+    pitch_dist <- df %>%
+      count(TaggedPitchType) %>%
+      arrange(desc(n)) %>%
+      head(10)
+    
+    for (i in 1:nrow(pitch_dist)) {
+      cat(sprintf("  %-15s: %6d (%.1f%%)\n", 
+                  pitch_dist$TaggedPitchType[i],
+                  pitch_dist$n[i],
+                  pitch_dist$n[i]/nrow(df)*100))
+    }
+  }
+  
+  # Velo check for fastballs
+  if (all(c("TaggedPitchType", "RelSpeed") %in% names(df))) {
+    fastball_velos <- df %>%
+      filter(TaggedPitchType == "Fastball") %>%
+      pull(RelSpeed)
+    
+    if (length(fastball_velos) > 0) {
+      cat(sprintf("\nFastball velocity check:\n"))
+      cat(sprintf("  Min velocity:  %.1f mph\n", min(fastball_velos)))
+      cat(sprintf("  Mean velocity: %.1f ± %.1f mph\n", 
+                  mean(fastball_velos), sd(fastball_velos)))
+    }
+  }
+  
+  return(TRUE)
+}
+
+# ==========================================
+# Main Pipeline
+# ==========================================
+
+run_necbl_pipeline <- function(folder_path = "Navs CSVs", 
+                              save_to_file = TRUE) {
+  
+
+  cat(" NECBL STUFF+ PIPELINE \n")
+  
+  
+  # Step 1: Combine data
+  cat("STEP 1: Combining all data\n")
+  cat("========================================\n")
+  combined_data <- combine_navs_csvs(folder_path, use_google_drive = TRUE)
+  initial_rows <- nrow(combined_data)
+  initial_cols <- ncol(combined_data)
+  
+  # Step 2: Clean all data
+  cat("\nSTEP 2: comprehensive data cleaning")
+  combined_data <- clean_all_data(combined_data)
+  
+  # Step 3: Filter for core metrics only
+  cat("\nSTEP 3: Filter for Velo/spin/break")
+  combined_data <- filter_core_metrics(combined_data)
+  
+  # Step 4: Final quality assessment
+  cat("\nSTEP 4: qquality assessnment")
+  assess_final_quality(combined_data)
+  
+  # Step 5: Save or return results
+  if (save_to_file) {
+    cat("\n========================================\n")
+    cat("SAVING RESULTS\n")
+    cat("========================================\n\n")
+    
+    # Save in working directory (no subfolder)
+    csv_file <- paste0("necbl_clean_", Sys.Date(), ".csv")
+    rds_file <- paste0("necbl_clean_", Sys.Date(), ".rds")
+    
+    write.csv(combined_data, csv_file, row.names = FALSE)
+    saveRDS(combined_data, rds_file, compress = TRUE)
+    
+    cat("✓ Files saved in working directory:\n")
+    cat("  •", csv_file, "\n")
+    cat("  •", rds_file, "\n")
+    
+    # File sizes
+    cat("\nFile sizes:\n")
+    cat(sprintf("  CSV: %.2f MB\n", file.size(csv_file)/(1024^2)))
+    cat(sprintf("  RDS: %.2f MB\n", file.size(rds_file)/(1024^2)))
+  }
+  
+  # Final summary
+  cat(" PIPELINE COMPLETE \n")
+
+  
+  cat("TRANSFORMATION SUMMARY:\n")
+  cat("----------------------------------------\n")
+  cat(sprintf("  Initial:   %d rows × %d columns\n", initial_rows, initial_cols))
+  cat(sprintf("  Final:     %d rows × %d columns\n", nrow(combined_data), ncol(combined_data)))
+  cat(sprintf("  Retention: %.1f%% of rows\n", nrow(combined_data)/initial_rows*100))
+  cat("\nKey cleaning applied:\n")
+  cat("   Core metrics complete (RelSpeed, SpinRate, IVB, HB)\n")
+  cat("   Other columns kept as-is (may have NAs)\n")
+  cat("   StolenBase & CaughtStealing → 'Undefined'\n")
+  cat("   Pitch types consolidated\n")
+  cat("  Fastballs < 77 mph removed\n")
+  
+  cat("\n✓ Data ready for Stuff+ modeling!\n\n")
+  
+  # Store in global environment
+  necbl_clean_data <<- combined_data
+  cat("Data stored as 'necbl_clean_data' in workspace\n\n")
+  
+  return(combined_data)
+}
+
+# ==========================================
+# EXECUTE THE PIPELINE
+# ==========================================
+
+# Run the pipeline - data saved to working directory and workspace
+necbl_data <- run_necbl_pipeline(
+  folder_path = "Navs CSVs",
+  save_to_file = TRUE  # Set to FALSE if you don't want files
+)
+
+# Data is now available as:
+# - necbl_data (returned from function)
+# - necbl_clean_data (in global environment)
+# - necbl_clean_[date].csv and .rds files in working directory
