@@ -6,14 +6,14 @@ library(ggplot2)
 library(data.table)
 set.seed(42)
 
-# Load your specific file
+# Load  specific file
 df <- readRDS("necbl_clean_2025-08-09.rds")
-cat("✓ Loaded", nrow(df), "pitches from NECBL data\n\n")
+cat(" Loaded", nrow(df), "pitches from NECBL data\n\n")
 
 create_run_values <- function(df) {
   cat("Creating Run Value outcomes\n")
 
-# First, standardize pitch types
+# Standardize pitch types
   df <- df %>%
     mutate(
       TaggedPitchType = case_when(
@@ -24,10 +24,8 @@ create_run_values <- function(df) {
     ) %>%
     filter(!is.na(TaggedPitchType))  # Remove Other pitches
   
-  cat("Removed 'Other' pitches and combined TwoSeamFastBall with Sinker\n")
 
-# NECBL Linear Weights (college level values)
-  # These are calibrated for college baseball
+# NECBL Linear Weights
   rv_weights <- list(
     "HomeRun" = 1.35,
     "Triple" = 0.95,
@@ -234,7 +232,7 @@ select_features_boruta <- function(pitch_data, pitch_type_name) {
       return(c("RelSpeed", "SpinRate", "InducedVertBreak", "HorzBreak"))
     }
     
-    cat("  ✓ Selected", length(confirmed_features), "features:", paste(confirmed_features, collapse = ", "), "\n")
+    cat("  Selected", length(confirmed_features), "features:", paste(confirmed_features, collapse = ", "), "\n")
     return(confirmed_features)
     
   }, error = function(e) {
