@@ -1,0 +1,249 @@
+library(tidyverse)
+library(randomForest)
+library(caret)
+library(Boruta)
+library(ggplot2)
+library(data.table)
+set.seed(42)
+
+# Load your specific file
+df <- readRDS("necbl_clean_2025-08-09.rds")
+cat("✓ Loaded", nrow(df), "pitches from NECBL data\n\n")
+
+create_run_values <- function(df) {
+  cat("Creating Run Value outcomes\n")
+
+# First, standardize pitch types
+  df <- df %>%
+    mutate(
+      TaggedPitchType = case_when(
+        TaggedPitchType == "TwoSeamFastBall" ~ "Sinker",
+        TaggedPitchType == "Other" ~ NA_character_,  # Mark Other as NA to filter out
+        TRUE ~ TaggedPitchType
+      )
+    ) %>%
+    filter(!is.na(TaggedPitchType))  # Remove Other pitches
+  
+  cat("Removed 'Other' pitches and combined TwoSeamFastBall with Sinker\n")
+
+# NECBL Linear Weights (college level values)
+  # These are calibrated for college baseball
+  rv_weights <- list(
+    "HomeRun" = 1.35,
+    "Triple" = 0.95,
+    "Double" = 0.70,
+    "Single" = 0.42,
+    "Walk" = 0.28,
+    "HitByPitch" = 0.30,
+    "BallCalled" = 0.04,       
+    "StrikeCalled" = -0.04,      
+    "StrikeSwinging" = -0.05,    
+    "FoulBall" = -0.025,         
+    "Out" = -0.24,
+    "FieldersChoice" = -0.22,
+    "Error" = 0.25,              
+    "Sacrifice" = -0.18,
+    "InPlay" = -0.08       (random default for rogue in play)
+  )
+  
+  # Map PitchCall to run values
+  df <- df %>%
+    mutate(
+      # Combo BallInDirt to BallCalled
+      PitchCall = case_when(
+        PitchCall == "BallInDirt" ~ "BallCalled",
+        TRUE ~ PitchCall
+      ),
+      # Then assign run values
+      run_value = case_when(
+        PitchCall == "HomeRun" ~ rv_weights$HomeRun,
+        PitchCall == "Triple" ~ rv_weights$Triple,
+        PitchCall == "Double" ~ rv_weights$Double,
+        PitchCall == "Single" ~ rv_weights$Single,
+        PitchCall == "BallCalled" ~ rv_weights$BallCalled,
+        PitchCall == "StrikeCalled" ~ rv_weights$StrikeCalled,
+        PitchCall == "StrikeSwinging" ~ rv_weights$StrikeSwinging,
+        PitchCall == "FoulBall" ~ rv_weights$FoulBall,
+        PitchCall == "Out" ~ rv_weights$Out,
+        PitchCall == "FieldersChoice" ~ rv_weights$FieldersChoice,
+        PitchCall == "Error" ~ rv_weights$Error,
+        PitchCall == "Sacrifice" ~ rv_weights$Sacrifice,
+        PitchCall == "HitByPitch" ~ rv_weights$HitByPitch,
+        PitchCall == "InPlay" ~ rv_weights$InPlay,
+        TRUE ~ 0
+      )
+    )
+  
+  # Create pitcher name mapping if Pitcher column exists
+  if ("Pitcher" %in% names(df)) {
+    pitcher_names <- df %>%
+      select(PitcherId, Pitcher) %>%
+      distinct() %>%
+      filter(!is.na(Pitcher))
+    
+    cat("Created pitcher ID to name mapping for", nrow(pitcher_names), "pitchers\n")
+    
+    # Store as an attribute for later use
+    attr(df, "pitcher_names") <- pitcher_names
+  }
+
+outcome_summary <- df %>%
+    group_by(PitchCall) %>%
+    summarise(
+      count = n(),
+      avg_rv = mean(run_value, na.rm = TRUE),
+      .groups = "drop"
+    ) %>%
+    arrange(desc(avg_rv))
+  
+  cat("\nOutcome Distribution:\n")
+  print(head(outcome_summary, 10))
+
+ pitch_type_summary <- df %>%
+    count(TaggedPitchType) %>%
+    arrange(desc(n))
+  
+  cat("\nPitch Type Distribution (after consolidation):\n")
+  print(pitch_type_summary)
+  
+  return(df)
+}
+
+FEATURE ENGINEERING
+
+engineer_pitching_features <- function(df) {
+  cat("\nEngineering features for NECBL pitches...\n")
+  
+  # Calculate averages for FBs (including Sinkers)
+  pitcher_fb_avgs <- df %>%
+    filter(TaggedPitchType %in% c("Fastball", "Sinker")) %>%
+    group_by(PitcherId) %>%
+    summarise(
+      avg_fb_velo = mean(RelSpeed, na.rm = TRUE),
+      avg_fb_ivb = mean(InducedVertBreak, na.rm = TRUE),
+      avg_fb_hb = mean(HorzBreak, na.rm = TRUE),
+      avg_fb_spin = mean(SpinRate, na.rm = TRUE),
+      .groups = "drop"
+    )
+
+df <- df %>%
+    left_join(pitcher_fb_avgs, by = "PitcherId") %>%
+    mutate(
+      # Velocity differential from fastball
+      velo_diff = ifelse(
+        TaggedPitchType %in% c("Changeup", "Slider", "Curveball", "Cutter"),
+        RelSpeed - avg_fb_velo,
+        NA
+      ),
+      
+      # Movement differentials
+      ivb_diff = ifelse(
+        TaggedPitchType %in% c("Changeup", "Slider", "Curveball", "Cutter"),
+        InducedVertBreak - avg_fb_ivb,
+        NA
+      ),
+      
+      hb_diff = ifelse(
+        TaggedPitchType %in% c("Changeup", "Slider", "Curveball", "Cutter"),
+        HorzBreak - avg_fb_hb,
+        NA
+      ),
+
+# Total movement
+      total_break = sqrt(InducedVertBreak^2 + HorzBreak^2),
+      
+      # Movement angle
+      break_angle = atan2(HorzBreak, InducedVertBreak) * 180/pi,
+      
+      # Spin efficiency proxy (similar to driveline example I have)
+      spin_efficiency = InducedVertBreak / (SpinRate/100),
+
+ # Location features
+      is_zone = if("PlateLocHeight" %in% names(.)) {
+        abs(PlateLocHeight) <= 1.5 & abs(PlateLocSide) <= 0.83
+      } else NA,
+      
+      # Count leverage
+      ahead_in_count = if(all(c("Balls", "Strikes") %in% names(.))) {
+        Strikes > Balls
+      } else NA,
+      
+      # Pitch sequence features
+      pitch_num_in_ab = if("PitchofPA" %in% names(.)) PitchofPA else NA
+    )
+ return(df)
+}
+
+FEATURE SELECTION (Boruta)
+
+select_features_boruta <- function(pitch_data, pitch_type_name) {
+  cat("\nSelecting features for", pitch_type_name, "using Boruta...\n")
+  
+  # Filter to pitches with complete data
+  complete_data <- pitch_data %>%
+    filter(
+      !is.na(run_value),
+      !is.na(RelSpeed),
+      !is.na(SpinRate),
+      !is.na(InducedVertBreak),
+      !is.na(HorzBreak)
+    )
+  
+  if (nrow(complete_data) < 100) {
+    cat("  Not enough data for", pitch_type_name, "\n")
+    return(c("RelSpeed", "SpinRate", "InducedVertBreak", "HorzBreak"))
+  }
+  
+  # Sample for Boruta
+  sample_size <- min(5000, nrow(complete_data))
+  sampled_data <- complete_data[sample(nrow(complete_data), sample_size), ]
+  
+  # Prepare feature matrix
+  feature_cols <- c("RelSpeed", "SpinRate", "InducedVertBreak", "HorzBreak", "total_break")
+  
+  # Add optional features
+  if ("PlateLocHeight" %in% names(sampled_data)) {
+    feature_cols <- c(feature_cols, "PlateLocHeight", "PlateLocSide")
+  }
+  
+  if ("velo_diff" %in% names(sampled_data) && pitch_type_name != "Fastball") {
+    feature_cols <- c(feature_cols, "velo_diff", "ivb_diff", "hb_diff")
+  }
+  
+  if ("Extension" %in% names(sampled_data)) {
+    feature_cols <- c(feature_cols, "Extension")
+  }
+  
+# Create formula
+  formula_str <- paste("run_value ~", paste(feature_cols, collapse = " + "))
+  
+  # Run Boruta
+  tryCatch({
+    boruta_result <- Boruta(
+      as.formula(formula_str),
+      data = sampled_data,
+      maxRuns = 100,
+      doTrace = 0
+    )
+    
+    # Get confirmed features
+    confirmed_features <- getSelectedAttributes(boruta_result, withTentative = FALSE)
+    
+    if (length(confirmed_features) == 0) {
+      cat("  No features confirmed by Boruta, using defaults\n")
+      return(c("RelSpeed", "SpinRate", "InducedVertBreak", "HorzBreak"))
+    }
+    
+    cat("  ✓ Selected", length(confirmed_features), "features:", paste(confirmed_features, collapse = ", "), "\n")
+    return(confirmed_features)
+    
+  }, error = function(e) {
+    cat("  Boruta failed, using default features\n")
+    return(c("RelSpeed", "SpinRate", "InducedVertBreak", "HorzBreak"))
+  })
+}
+
+
+
+FROM HERE,  BUILD RANDOM FOREST MODELS W/ PLATOON SPLITS (ALL Dexterity combos possible combo'd with pitch type (ex. LeftyvRightyFB, LeftyvLeftyFB, RightyvLeftyFB, RightyvRightyFB); Split data for test and validation; combine all predictions, generate Stuff/Pitching/Arsenal+Numbers)
+
