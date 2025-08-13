@@ -1,0 +1,719 @@
+# ==========================================
+# NECBL PITCHING+ MODEL - EXPECTED RUN VALUE APPROACH
+# Adapted for NECBL from MLB Framework
+# ==========================================
+
+library(tidyverse)
+library(randomForest)
+library(caret)
+library(Boruta)
+library(ggplot2)
+library(data.table)
+set.seed(42)
+
+# ==========================================
+# LoadClean Data
+# ==========================================
+
+
+# Load specific file
+df <- readRDS("necbl_clean_2025-08-11.rds")
+cat("Loaded", nrow(df), "pitches from NECBL data\n\n")
+
+# ==========================================
+# Run Values
+# ==========================================
+
+create_run_values <- function(df) {
+  cat("Creating Run Value outcomes...\n")
+  
+  # First, standardize pitch types
+  df <- df %>%
+    mutate(
+      TaggedPitchType = case_when(
+        TaggedPitchType == "TwoSeamFastBall" ~ "Sinker",
+        TaggedPitchType == "Other" ~ NA_character_,  # Mark Other as NA to filter out
+        TRUE ~ TaggedPitchType
+      )
+    ) %>%
+    filter(!is.na(TaggedPitchType))  # Remove Other pitches
+  
+  cat("Removed 'Other' pitches and combined TwoSeamFastBall with Sinker\n")
+  
+  # NECBL Linear Weights
+  rv_weights <- list(
+    "HomeRun" = 1.35,
+    "Triple" = 0.95,
+    "Double" = 0.70,
+    "Single" = 0.42,
+    "Walk" = 0.28,
+    "HitByPitch" = 0.30,
+    "BallCalled" = 0.04,        # Ball adds small positive value
+    "StrikeCalled" = -0.04,      # Strike adds small negative value
+    "StrikeSwinging" = -0.05,    # Swinging strike slightly worse
+    "FoulBall" = -0.025,         # Foul ball slight negative
+    "Out" = -0.24,
+    "FieldersChoice" = -0.22,
+    "Error" = 0.25,              # Error benefits offense
+    "Sacrifice" = -0.18,
+    "InPlay" = -0.08             # Default for unresolved InPlay
+  )
+  
+  # Map PitchCall to run values - ENSURE BallInDirt is handled
+  df <- df %>%
+    mutate(
+      # First consolidate BallInDirt to BallCalled if it exists
+      PitchCall = case_when(
+        PitchCall == "BallInDirt" ~ "BallCalled",
+        TRUE ~ PitchCall
+      ),
+      # Then assign run values
+      run_value = case_when(
+        PitchCall == "HomeRun" ~ rv_weights$HomeRun,
+        PitchCall == "Triple" ~ rv_weights$Triple,
+        PitchCall == "Double" ~ rv_weights$Double,
+        PitchCall == "Single" ~ rv_weights$Single,
+        PitchCall == "BallCalled" ~ rv_weights$BallCalled,
+        PitchCall == "StrikeCalled" ~ rv_weights$StrikeCalled,
+        PitchCall == "StrikeSwinging" ~ rv_weights$StrikeSwinging,
+        PitchCall == "FoulBall" ~ rv_weights$FoulBall,
+        PitchCall == "Out" ~ rv_weights$Out,
+        PitchCall == "FieldersChoice" ~ rv_weights$FieldersChoice,
+        PitchCall == "Error" ~ rv_weights$Error,
+        PitchCall == "Sacrifice" ~ rv_weights$Sacrifice,
+        PitchCall == "HitByPitch" ~ rv_weights$HitByPitch,
+        PitchCall == "InPlay" ~ rv_weights$InPlay,
+        TRUE ~ 0
+      )
+    )
+  
+  # Create pitcher name mapping if Pitcher column exists
+  if ("Pitcher" %in% names(df)) {
+    pitcher_names <- df %>%
+      select(PitcherId, Pitcher) %>%
+      distinct() %>%
+      filter(!is.na(Pitcher))
+    
+    cat("Created pitcher ID to name mapping for", nrow(pitcher_names), "pitchers\n")
+    
+    # Store as an attribute for later use
+    attr(df, "pitcher_names") <- pitcher_names
+  }
+  
+  # Summary of outcomes
+  outcome_summary <- df %>%
+    group_by(PitchCall) %>%
+    summarise(
+      count = n(),
+      avg_rv = mean(run_value, na.rm = TRUE),
+      .groups = "drop"
+    ) %>%
+    arrange(desc(avg_rv))
+  
+  cat("\nOutcome Distribution:\n")
+  print(head(outcome_summary, 10))
+  
+  # Show pitch type distribution after consolidation
+  pitch_type_summary <- df %>%
+    count(TaggedPitchType) %>%
+    arrange(desc(n))
+  
+  cat("\nPitch Type Distribution (after consolidation):\n")
+  print(pitch_type_summary)
+  
+  return(df)
+}
+
+# ==========================================
+# Feature Engineering
+# ==========================================
+
+engineer_pitching_features <- function(df) {
+  cat("\nEngineering features for NECBL pitches...\n")
+  
+  # Calculate pitcher averages for their fastballs (including Sinkers)
+  pitcher_fb_avgs <- df %>%
+    filter(TaggedPitchType %in% c("Fastball", "Sinker")) %>%
+    group_by(PitcherId) %>%
+    summarise(
+      avg_fb_velo = mean(RelSpeed, na.rm = TRUE),
+      avg_fb_ivb = mean(InducedVertBreak, na.rm = TRUE),
+      avg_fb_hb = mean(HorzBreak, na.rm = TRUE),
+      avg_fb_spin = mean(SpinRate, na.rm = TRUE),
+      .groups = "drop"
+    )
+  
+  # Join back and create differential features
+  df <- df %>%
+    left_join(pitcher_fb_avgs, by = "PitcherId") %>%
+    mutate(
+      # Velocity differential from fastball
+      velo_diff = ifelse(
+        TaggedPitchType %in% c("Changeup", "Slider", "Curveball", "Cutter"),
+        RelSpeed - avg_fb_velo,
+        NA
+      ),
+      
+      # Movement differentials
+      ivb_diff = ifelse(
+        TaggedPitchType %in% c("Changeup", "Slider", "Curveball", "Cutter"),
+        InducedVertBreak - avg_fb_ivb,
+        NA
+      ),
+      
+      hb_diff = ifelse(
+        TaggedPitchType %in% c("Changeup", "Slider", "Curveball", "Cutter"),
+        HorzBreak - avg_fb_hb,
+        NA
+      ),
+      
+      # Total movement
+      total_break = sqrt(InducedVertBreak^2 + HorzBreak^2),
+      
+      # Movement angle
+      break_angle = atan2(HorzBreak, InducedVertBreak) * 180/pi,
+      
+      # Spin efficiency proxy
+      spin_efficiency = InducedVertBreak / (SpinRate/100),
+      
+      # Location features (if available)
+      is_zone = if("PlateLocHeight" %in% names(.)) {
+        abs(PlateLocHeight) <= 1.5 & abs(PlateLocSide) <= 0.83
+      } else NA,
+      
+      # Count leverage (if available)
+      ahead_in_count = if(all(c("Balls", "Strikes") %in% names(.))) {
+        Strikes > Balls
+      } else NA,
+      
+      # Pitch sequence features (if available)
+      pitch_num_in_ab = if("PitchofPA" %in% names(.)) PitchofPA else NA
+    )
+  
+  cat("Created", sum(!is.na(df$velo_diff)), "pitches with velocity differentials\n")
+  cat("Features engineered for", nrow(df), "total pitches\n")
+  
+  return(df)
+}
+
+# ==========================================
+# Feature Selection
+# ==========================================
+
+select_features_boruta <- function(pitch_data, pitch_type_name) {
+  cat("\nSelecting features for", pitch_type_name, "using Boruta...\n")
+  
+  # Filter to pitches with complete data
+  complete_data <- pitch_data %>%
+    filter(
+      !is.na(run_value),
+      !is.na(RelSpeed),
+      !is.na(SpinRate),
+      !is.na(InducedVertBreak),
+      !is.na(HorzBreak)
+    )
+  
+  if (nrow(complete_data) < 100) {
+    cat("  Not enough data for", pitch_type_name, "\n")
+    return(c("RelSpeed", "SpinRate", "InducedVertBreak", "HorzBreak"))
+  }
+  
+  # Sample for Boruta (it's slow with large datasets)
+  sample_size <- min(5000, nrow(complete_data))
+  sampled_data <- complete_data[sample(nrow(complete_data), sample_size), ]
+  
+  # Prepare feature matrix
+  feature_cols <- c("RelSpeed", "SpinRate", "InducedVertBreak", "HorzBreak", "total_break")
+  
+  # Add optional features if they exist
+  if ("PlateLocHeight" %in% names(sampled_data)) {
+    feature_cols <- c(feature_cols, "PlateLocHeight", "PlateLocSide")
+  }
+  
+  if ("velo_diff" %in% names(sampled_data) && pitch_type_name != "Fastball") {
+    feature_cols <- c(feature_cols, "velo_diff", "ivb_diff", "hb_diff")
+  }
+  
+  if ("Extension" %in% names(sampled_data)) {
+    feature_cols <- c(feature_cols, "Extension")
+  }
+  
+  # Create formula
+  formula_str <- paste("run_value ~", paste(feature_cols, collapse = " + "))
+  
+  # Run Boruta
+  tryCatch({
+    boruta_result <- Boruta(
+      as.formula(formula_str),
+      data = sampled_data,
+      maxRuns = 100,
+      doTrace = 0
+    )
+    
+    # Get confirmed features
+    confirmed_features <- getSelectedAttributes(boruta_result, withTentative = FALSE)
+    
+    if (length(confirmed_features) == 0) {
+      cat("  No features confirmed by Boruta, using defaults\n")
+      return(c("RelSpeed", "SpinRate", "InducedVertBreak", "HorzBreak"))
+    }
+    
+    cat("  Selected", length(confirmed_features), "features:", paste(confirmed_features, collapse = ", "), "\n")
+    return(confirmed_features)
+    
+  }, error = function(e) {
+    cat("  Boruta failed, using default features\n")
+    return(c("RelSpeed", "SpinRate", "InducedVertBreak", "HorzBreak"))
+  })
+}
+
+# ==========================================
+# RF Platoon Models by pitch type
+# ==========================================
+
+build_pitch_models_with_platoons <- function(df) {
+  cat("\nBuilding Random Forest models for each pitch type AND platoon split...\n")
+  
+  # Add platoon matchup column
+  if (!all(c("PitcherThrows", "BatterSide") %in% names(df))) {
+    cat("Warning: PitcherThrows or BatterSide not found. Checking alternative column names...\n")
+    
+    # Try alternative column names
+    if ("PitcherHand" %in% names(df)) {
+      df$PitcherThrows <- df$PitcherHand
+    }
+    if ("BatterHand" %in% names(df)) {
+      df$BatterSide <- df$BatterHand
+    }
+    if ("Side" %in% names(df)) {
+      df$BatterSide <- df$Side
+    }
+    
+    # If still missing, create default
+    if (!"PitcherThrows" %in% names(df)) {
+      cat("  Creating default PitcherThrows column (all 'R')...\n")
+      df$PitcherThrows <- "R"
+    }
+    if (!"BatterSide" %in% names(df)) {
+      cat("  Creating default BatterSide column (all 'R')...\n")
+      df$BatterSide <- "R"
+    }
+  }
+  
+  # Create platoon matchup variable
+  df <- df %>%
+    mutate(
+      platoon = paste(PitcherThrows, "v", BatterSide, sep = "")
+    )
+  
+  # Get pitch types with sufficient data
+  pitch_platoon_counts <- df %>%
+    filter(!is.na(run_value)) %>%
+    count(TaggedPitchType, platoon) %>%
+    filter(n >= 50) %>%  # Lower threshold for platoon splits
+    arrange(TaggedPitchType, platoon)
+  
+  cat("\nPitch type and platoon combinations to model:\n")
+  print(pitch_platoon_counts)
+  
+  models <- list()
+  predictions_list <- list()
+  
+  # Get unique pitch types
+  pitch_types <- unique(pitch_platoon_counts$TaggedPitchType)
+  
+  for (pt in pitch_types) {
+    if (is.na(pt) || pt == "Undefined") next
+    
+    cat("\nBuilding models for", pt, "...\n")
+    
+    # Get pitch-specific data
+    pitch_data <- df %>%
+      filter(TaggedPitchType == pt)
+    
+    # Get platoons for this pitch type
+    available_platoons <- pitch_platoon_counts %>%
+      filter(TaggedPitchType == pt) %>%
+      pull(platoon)
+    
+    for (plat in available_platoons) {
+      cat("  Modeling", pt, "-", plat, "...\n")
+      
+      # Get platoon-specific data
+      platoon_data <- pitch_data %>%
+        filter(platoon == plat)
+      
+      # Feature selection for this specific combination
+      selected_features <- select_features_boruta(platoon_data, paste(pt, plat, sep = "_"))
+      
+      # Prepare data for modeling
+      model_data <- platoon_data %>%
+        filter(!is.na(run_value)) %>%
+        select(all_of(c(selected_features, "run_value", "PitcherId", "GameID", "platoon")))
+      
+      # Remove any remaining NAs
+      model_data <- na.omit(model_data)
+      
+      if (nrow(model_data) < 30) {
+        cat("Not enough clean data for", pt, plat, "\n")
+        next
+      }
+      
+      # Split data (80/20 split)
+      set.seed(42)
+      train_idx <- createDataPartition(model_data$run_value, p = 0.8, list = FALSE)
+      train_data <- model_data[train_idx, ]
+      test_data <- model_data[-train_idx, ]
+      
+      # Train Random Forest for this platoon split
+      rf_formula <- as.formula(paste("run_value ~", paste(selected_features, collapse = " + ")))
+      
+      rf_model <- randomForest(
+        rf_formula,
+        data = train_data,
+        ntree = 300,  # Slightly fewer trees for platoon models
+        mtry = max(1, floor(sqrt(length(selected_features)))),
+        importance = TRUE
+      )
+      
+      # Evaluate on test set
+      if (nrow(test_data) > 0) {
+        test_pred <- predict(rf_model, test_data)
+        test_rmse <- sqrt(mean((test_pred - test_data$run_value)^2))
+        test_cor <- cor(test_pred, test_data$run_value, use = "complete.obs")
+        
+        cat("    RMSE:", round(test_rmse, 4), "| Correlation:", round(test_cor, 3), "\n")
+      }
+      
+      # Store model with composite key
+      model_key <- paste(pt, plat, sep = "_")
+      models[[model_key]] <- rf_model
+      
+      # Get predictions for all pitches of this type/platoon
+      all_platoon_data <- platoon_data %>%
+        filter(platoon == plat) %>%
+        select(all_of(c(selected_features, "PitcherId", "GameID", "run_value", "platoon")))
+      
+      # Handle NAs by using mean imputation for prediction
+      for (col in selected_features) {
+        if (any(is.na(all_platoon_data[[col]]))) {
+          all_platoon_data[[col]][is.na(all_platoon_data[[col]])] <- mean(all_platoon_data[[col]], na.rm = TRUE)
+        }
+      }
+      
+      all_predictions <- predict(rf_model, all_platoon_data)
+      
+      platoon_data_with_pred <- platoon_data %>%
+        filter(platoon == plat)
+      platoon_data_with_pred$expected_rv <- all_predictions
+      
+      predictions_list[[model_key]] <- platoon_data_with_pred %>%
+        select(PitcherId, GameID, TaggedPitchType, platoon, run_value, expected_rv)
+      
+      # Show top features for this platoon
+      importance_df <- as.data.frame(importance(rf_model))
+      top_features <- importance_df %>%
+        arrange(desc(`%IncMSE`)) %>%
+        head(3)
+      cat("    Top features:", paste(rownames(top_features), collapse = ", "), "\n")
+    }
+  }
+  
+  # Combine all predictions
+  all_predictions_df <- bind_rows(predictions_list)
+  
+  # Summary of models created
+  cat("\nMODEL SUMMARY:\n")
+  cat("Total models created:", length(models), "\n")
+  cat("Platoon splits included:\n")
+  
+  platoon_summary <- all_predictions_df %>%
+    group_by(platoon, TaggedPitchType) %>%
+    summarise(
+      n_pitches = n(),
+      avg_actual_rv = mean(run_value, na.rm = TRUE),
+      avg_expected_rv = mean(expected_rv, na.rm = TRUE),
+      .groups = "drop"
+    ) %>%
+    arrange(platoon, TaggedPitchType)
+  
+  print(platoon_summary)
+  
+  return(list(
+    models = models,
+    predictions = all_predictions_df,
+    platoon_summary = platoon_summary
+  ))
+}
+
+# ==========================================
+# Scores
+# ==========================================
+
+calculate_pitching_plus_scores <- function(predictions_df) {
+  cat("\nCalculating Pitching+ scores...\n")
+  
+  # Get pitcher names if available
+  pitcher_names <- attr(predictions_df, "pitcher_names")
+  
+  # Overall pitcher stats
+  pitcher_stats <- predictions_df %>%
+    group_by(PitcherId) %>%
+    summarise(
+      n_pitches = n(),
+      actual_rv_per_100 = sum(run_value, na.rm = TRUE) / n() * 100,
+      expected_rv_per_100 = sum(expected_rv, na.rm = TRUE) / n() * 100,
+      .groups = "drop"
+    ) %>%
+    mutate(
+      # Invert and scale (lower RV is better for pitchers)
+      actual_plus = 100 - (actual_rv_per_100 - mean(actual_rv_per_100)) / sd(actual_rv_per_100) * 10,
+      expected_plus = 100 - (expected_rv_per_100 - mean(expected_rv_per_100)) / sd(expected_rv_per_100) * 10,
+      pitching_plus = expected_plus
+    )
+  
+  # Add pitcher names if mapping exists
+  if (!is.null(pitcher_names)) {
+    pitcher_stats <- pitcher_stats %>%
+      left_join(pitcher_names, by = "PitcherId") %>%
+      select(PitcherId, Pitcher, everything())
+  }
+  
+  # Sort by Pitching+ and add percentile
+  pitcher_stats <- pitcher_stats %>%
+    arrange(desc(pitching_plus)) %>%
+    mutate(
+      percentile = percent_rank(pitching_plus) * 100
+    )
+  
+  # By pitch type
+  pitch_type_stats <- predictions_df %>%
+    group_by(PitcherId, TaggedPitchType) %>%
+    summarise(
+      n_pitches = n(),
+      expected_rv_per_100 = sum(expected_rv, na.rm = TRUE) / n() * 100,
+      .groups = "drop"
+    ) %>%
+    group_by(TaggedPitchType) %>%
+    mutate(
+      pitch_type_plus = 100 - (expected_rv_per_100 - mean(expected_rv_per_100)) / sd(expected_rv_per_100) * 10
+    ) %>%
+    ungroup()
+  
+  # Add pitcher names to pitch type stats
+  if (!is.null(pitcher_names)) {
+    pitch_type_stats <- pitch_type_stats %>%
+      left_join(pitcher_names, by = "PitcherId") %>%
+      select(PitcherId, Pitcher, TaggedPitchType, everything())
+  }
+  
+  # By platoon splits
+  platoon_stats <- predictions_df %>%
+    group_by(PitcherId, platoon) %>%
+    summarise(
+      n_pitches = n(),
+      expected_rv_per_100 = sum(expected_rv, na.rm = TRUE) / n() * 100,
+      .groups = "drop"
+    ) %>%
+    group_by(platoon) %>%
+    mutate(
+      platoon_plus = 100 - (expected_rv_per_100 - mean(expected_rv_per_100)) / sd(expected_rv_per_100) * 10
+    ) %>%
+    ungroup()
+  
+  # Add pitcher names to platoon stats
+  if (!is.null(pitcher_names)) {
+    platoon_stats <- platoon_stats %>%
+      left_join(pitcher_names, by = "PitcherId") %>%
+      select(PitcherId, Pitcher, platoon, everything())
+  }
+  
+  # By pitch type AND platoon (most granular)
+  pitch_platoon_stats <- predictions_df %>%
+    group_by(PitcherId, TaggedPitchType, platoon) %>%
+    summarise(
+      n_pitches = n(),
+      actual_rv_per_100 = sum(run_value, na.rm = TRUE) / n() * 100,
+      expected_rv_per_100 = sum(expected_rv, na.rm = TRUE) / n() * 100,
+      .groups = "drop"
+    ) %>%
+    group_by(TaggedPitchType, platoon) %>%
+    mutate(
+      pitch_platoon_plus = 100 - (expected_rv_per_100 - mean(expected_rv_per_100, na.rm = TRUE)) / 
+        sd(expected_rv_per_100, na.rm = TRUE) * 10
+    ) %>%
+    ungroup()
+  
+  # Add pitcher names to pitch-platoon stats
+  if (!is.null(pitcher_names)) {
+    pitch_platoon_stats <- pitch_platoon_stats %>%
+      left_join(pitcher_names, by = "PitcherId") %>%
+      select(PitcherId, Pitcher, TaggedPitchType, platoon, everything())
+  }
+  
+  # Print platoon split summary
+  cat("\nPLATOON SPLIT PERFORMANCE:\n")
+  platoon_summary <- predictions_df %>%
+    group_by(platoon) %>%
+    summarise(
+      n_pitches = n(),
+      avg_actual_rv = mean(run_value, na.rm = TRUE),
+      avg_expected_rv = mean(expected_rv, na.rm = TRUE),
+      .groups = "drop"
+    )
+  print(platoon_summary)
+  
+  return(list(
+    pitcher_overall = pitcher_stats,
+    by_pitch_type = pitch_type_stats,
+    by_platoon = platoon_stats,
+    by_pitch_platoon = pitch_platoon_stats
+  ))
+}
+
+# ==========================================
+# STEP 7: VISUALIZATION
+# ==========================================
+
+create_visualizations <- function(pitcher_stats, pitch_type_stats) {
+  cat("\nCreating visualizations...\n")
+  
+  # 1. Distribution of Pitching+ scores
+  p1 <- ggplot(pitcher_stats %>% filter(n_pitches >= 100), 
+               aes(x = pitching_plus)) +
+    geom_histogram(bins = 30, fill = "#667eea", alpha = 0.7) +
+    geom_vline(xintercept = 100, color = "red", linetype = "dashed", size = 1) +
+    scale_x_continuous(breaks = seq(70, 130, 10)) +
+    labs(
+      title = "NECBL Pitching+ Distribution",
+      subtitle = "100 = League Average | Higher is Better",
+      x = "Pitching+ Score",
+      y = "Number of Pitchers"
+    ) +
+    theme_minimal() +
+    theme(
+      plot.title = element_text(size = 16, face = "bold"),
+      plot.subtitle = element_text(size = 12, color = "gray50")
+    )
+  
+  ggsave("necbl_pitching_plus_distribution.png", p1, width = 10, height = 6)
+  
+  # 2. Top performers
+  top_15 <- pitcher_stats %>%
+    filter(n_pitches >= 100) %>%
+    arrange(desc(pitching_plus)) %>%
+    head(15)
+  
+  p2 <- ggplot(top_15, aes(x = reorder(PitcherId, pitching_plus), y = pitching_plus)) +
+    geom_bar(stat = "identity", fill = "#28a745") +
+    geom_hline(yintercept = 100, color = "red", linetype = "dashed") +
+    coord_flip() +
+    labs(
+      title = "Top 15 Pitchers by Pitching+",
+      subtitle = "Minimum 100 pitches",
+      x = "",
+      y = "Pitching+ Score"
+    ) +
+    theme_minimal()
+  
+  ggsave("necbl_top_pitchers.png", p2, width = 10, height = 8)
+  
+  cat("Saved visualizations\n")
+}
+
+# ==========================================
+# Pipeline
+# ==========================================
+
+run_necbl_pitching_plus <- function() {
+  
+  # Step 1: Load and prepare data
+  df <- readRDS("necbl_clean_2025-08-11.rds")
+  
+  # Step 2: Create run values
+  df <- create_run_values(df)
+  
+  # Step 3: Engineer features
+  df <- engineer_pitching_features(df)
+  
+  # Step 4: Build models with platoon splits and get predictions
+  model_results <- build_pitch_models_with_platoons(df)
+  
+  # Step 5: Calculate Pitching+ scores
+  pitching_scores <- calculate_pitching_plus_scores(model_results$predictions)
+  
+  # Step 6: Create visualizations
+  create_visualizations(pitching_scores$pitcher_overall, pitching_scores$by_pitch_type)
+  
+  # Step 7: Save results with platoon information
+  cat("\nSaving results...\n")
+  
+  write.csv(pitching_scores$pitcher_overall, 
+            paste0("necbl_pitching_plus_", Sys.Date(), ".csv"),
+            row.names = FALSE)
+  
+  write.csv(pitching_scores$by_pitch_type,
+            paste0("necbl_pitch_type_plus_", Sys.Date(), ".csv"),
+            row.names = FALSE)
+  
+  write.csv(pitching_scores$by_platoon,
+            paste0("necbl_platoon_plus_", Sys.Date(), ".csv"),
+            row.names = FALSE)
+  
+  write.csv(pitching_scores$by_pitch_platoon,
+            paste0("necbl_pitch_platoon_plus_", Sys.Date(), ".csv"),
+            row.names = FALSE)
+  
+  saveRDS(list(
+    models = model_results$models,
+    predictions = model_results$predictions,
+    pitcher_stats = pitching_scores$pitcher_overall,
+    pitch_type_stats = pitching_scores$by_pitch_type,
+    platoon_stats = pitching_scores$by_platoon,
+    pitch_platoon_stats = pitching_scores$by_pitch_platoon,
+    platoon_summary = model_results$platoon_summary
+  ), paste0("necbl_pitching_plus_complete_", Sys.Date(), ".rds"))
+  
+  # Display top performers with names
+  cat("\nTOP 10 PITCHERS BY PITCHING+:\n")
+  cat("================================\n")
+  top_10 <- pitching_scores$pitcher_overall %>%
+    filter(n_pitches >= 100) %>%
+    head(10)
+  
+  # Display with or without names based on what's available
+  if ("Pitcher" %in% names(top_10)) {
+    display_cols <- c("PitcherId", "Pitcher", "n_pitches", "pitching_plus", "percentile")
+  } else {
+    display_cols <- c("PitcherId", "n_pitches", "pitching_plus", "percentile")
+  }
+  
+  top_10_display <- top_10 %>%
+    select(all_of(display_cols)) %>%
+    mutate(across(where(is.numeric), ~round(., 1)))
+  
+  print(top_10_display)
+  
+  cat("\nNECBL PITCHING+ MODEL COMPLETE!\n")
+  
+  return(list(
+    models = model_results$models,
+    predictions = model_results$predictions,
+    pitcher_stats = pitching_scores$pitcher_overall,
+    pitch_type_stats = pitching_scores$by_pitch_type
+  ))
+}
+
+# ==========================================
+# RUN THE MODEL
+# ==========================================
+
+# Execute the complete pipeline
+results <- run_necbl_pitching_plus()
+
+# Access results
+pitcher_rankings <- results$pitcher_stats
+pitch_type_rankings <- results$pitch_type_stats
+models <- results$models
+
+cat("\nModel complete! Check your working directory for output files.\n")
