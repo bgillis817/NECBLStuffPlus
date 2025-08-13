@@ -689,7 +689,7 @@ run_necbl_pitching_plus <- function() {
   
   print(top_10_display)
   
-  cat("\nNECBL PITCHING+ MODEL COMPLETE!\n")
+  cat("\ncomplete\n")
   
   return(list(
     models = model_results$models,
@@ -711,4 +711,4 @@ pitcher_rankings <- results$pitcher_stats
 pitch_type_rankings <- results$pitch_type_stats
 models <- results$models
 
-cat("\nModel complete! Check your working directory for output files.\n")
+cat("\nModel complete.\n")
