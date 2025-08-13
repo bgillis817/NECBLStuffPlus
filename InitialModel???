@@ -567,7 +567,7 @@ calculate_pitching_plus_scores <- function(predictions_df) {
 }
 
 # ==========================================
-# STEP 7: VISUALIZATION
+# Visuals
 # ==========================================
 
 create_visualizations <- function(pitcher_stats, pitch_type_stats) {
@@ -700,7 +700,7 @@ run_necbl_pitching_plus <- function() {
 }
 
 # ==========================================
-# RUN THE MODEL
+# Run
 # ==========================================
 
 # Execute the complete pipeline
