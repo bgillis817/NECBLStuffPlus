@@ -1,8 +1,3 @@
-# ==========================================
-# NECBL PITCHING+ MODEL - EXPECTED RUN VALUE APPROACH
-# Adapted for NECBL from MLB Framework
-# ==========================================
-
 library(tidyverse)
 library(randomForest)
 library(caret)
