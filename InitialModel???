@@ -623,7 +623,7 @@ create_visualizations <- function(pitcher_stats, pitch_type_stats) {
 run_necbl_pitching_plus <- function() {
   
   # Step 1: Load and prepare data
-  df <- readRDS("necbl_clean_2025-08-11.rds")
+  df <- readRDS("necbl_clean_2025-08-14.rds")
   
   # Step 2: Create run values
   df <- create_run_values(df)
