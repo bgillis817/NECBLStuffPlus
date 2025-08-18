@@ -12,7 +12,7 @@ set.seed(42)
 
 
 # Load specific file
-df <- readRDS("necbl_clean_2025-08-11.rds")
+df <- readRDS("necbl_clean_2025-08-14.rds")
 cat("Loaded", nrow(df), "pitches from NECBL data\n\n")
 
 # ==========================================
