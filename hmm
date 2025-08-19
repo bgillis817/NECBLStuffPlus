@@ -10,15 +10,14 @@ set.seed(42)
 
 prepare_necbl_data <- function(df) {
   cat("NECBL Pitching+ Data Preparation\n")
-  cat("==================================\n\n")
   
-  # FIX: Convert integer64 PitcherId to character
+  # integer64 PitcherId to character
   if (class(df$PitcherId)[1] == "integer64") {
     cat("Converting PitcherId from integer64 to character...\n")
     df$PitcherId <- as.character(df$PitcherId)
   }
   
-  # CRITICAL: Extract season information BEFORE any filtering
+  # Extract season information BEFORE any filtering
   if ("Date" %in% names(df)) {
     df <- df %>%
       mutate(
@@ -33,7 +32,7 @@ prepare_necbl_data <- function(df) {
     cat("No Date column found - defaulting to 2025 season\n")
   }
   
-  # Store pitcher names WITH SEASON before any filtering
+  # Store pitcher names with season before any filtering
   pitcher_name_map <- df %>%
     select(PitcherId, Pitcher, Season) %>%
     distinct() %>%
