@@ -100,7 +100,7 @@ combine_navs_csvs <- function(folder_path = "Navs CSVs", use_google_drive = TRUE
   
   combined_data <- as.data.frame(combined_data)
   
-  cat("✓ Successfully combined data\n")
+  cat("Successfully combined data\n")
   cat("Total rows:", nrow(combined_data), "\n")
   cat("Total columns:", ncol(combined_data), "\n\n")
   
@@ -108,24 +108,59 @@ combine_navs_csvs <- function(folder_path = "Navs CSVs", use_google_drive = TRUE
 }
 
 # ==========================================
-# Data Cleaning and such
+# Data Cleaning 
 # ==========================================
 
 clean_all_data <- function(df) {
   
-  cat("\n========================================\n")
-  cat("Cleaning\n")
-  cat("========================================\n\n")
+  cat("Cleaning Data \n")
+
   
   original_rows <- nrow(df)
   
+  # Create PitcherId to Pitcher name mapping
+  if (all(c("PitcherId", "Pitcher") %in% names(df))) {
+    pitcher_mapping <- df %>%
+      select(PitcherId, Pitcher) %>%
+      distinct() %>%
+      filter(!is.na(Pitcher), !is.na(PitcherId))
+    
+    cat("Created pitcher ID to name mapping:\n")
+    cat(sprintf("  • Found %d unique pitcher IDs with names\n", nrow(pitcher_mapping)))
+    
+    # Save mapping as attribute
+    attr(df, "pitcher_mapping") <- pitcher_mapping
+  }
+  
   # Step 1: Update PitchCall based on PlayResult for InPlay events
   if (all(c("PitchCall", "PlayResult") %in% names(df))) {
-    cat("Updating PitchCall for InPlay events:\n")
+    cat("\nStep 1: Updating PitchCall for InPlay events:\n")
     
     # Count InPlay events before update
     inplay_count <- sum(df$PitchCall == "InPlay", na.rm = TRUE)
     cat(sprintf("  • Total InPlay events: %d\n", inplay_count))
+    
+     First standardize PlayResult before using it to update PitchCall
+    # Count variations before standardization
+    homerun_count <- sum(df$PlayResult == "Homerun", na.rm = TRUE)
+    sinigle_count <- sum(df$PlayResult == "Sinigle", na.rm = TRUE)
+    
+    # Standardize PlayResult variations
+    df <- df %>%
+      mutate(
+        PlayResult = case_when(
+          PlayResult == "Homerun" ~ "HomeRun",  # Standardize to HomeRun
+          PlayResult == "Sinigle" ~ "Single",   # Fix typo
+          TRUE ~ PlayResult
+        )
+      )
+    
+    if (homerun_count > 0) {
+      cat(sprintf("  • Standardized 'Homerun' → 'HomeRun': %d entries\n", homerun_count))
+    }
+    if (sinigle_count > 0) {
+      cat(sprintf("  • Fixed 'Sinigle' → 'Single': %d entries\n", sinigle_count))
+    }
     
     # For each InPlay, update PitchCall to the actual result from PlayResult
     inplay_indices <- which(df$PitchCall == "InPlay")
@@ -152,119 +187,188 @@ clean_all_data <- function(df) {
     }
   }
   
-  # Step 2: Clean PitchCall column - consolidate Ball variations
+  # Pitch CallCleaning
   if ("PitchCall" %in% names(df)) {
-    cat("\nCleaning PitchCall column:\n")
+    cat("\nStep 2: Cleaning PitchCall column (with BallInDirt fix and HomeRun standardization):\n")
     
-    # Count before changes
+    # Get initial counts of all ball-related calls
+    cat("  Initial counts:\n")
     ball_called <- sum(df$PitchCall == "BallCalled", na.rm = TRUE)
     ball_intentional <- sum(df$PitchCall == "BallIntentional", na.rm = TRUE)
     ball_in_dirt <- sum(df$PitchCall == "BallInDirt", na.rm = TRUE)
+    
+    cat(sprintf("    - BallCalled: %d\n", ball_called))
+    cat(sprintf("    - BallIntentional: %d\n", ball_intentional))
+    cat(sprintf("    - BallInDirt: %d\n", ball_in_dirt))
+    
+    # Also count variations that need standardization
+    homerun_pitchcall <- sum(df$PitchCall == "Homerun", na.rm = TRUE)
+    sinigle_pitchcall <- sum(df$PitchCall == "Sinigle", na.rm = TRUE)
+    
+    # Also count foul variations
     foul_ball <- sum(df$PitchCall == "FoulBall", na.rm = TRUE)
     foul_not_fieldable <- sum(df$PitchCall == "FoulBallNotFieldable", na.rm = TRUE)
     foul_fieldable <- sum(df$PitchCall == "FoulBallFieldable", na.rm = TRUE)
     
-    # Combine all Ball variations to BallCalled
-    if (ball_intentional > 0) {
-      cat(sprintf("  • BallIntentional: %d → converting to 'BallCalled'\n", ball_intentional))
-      df$PitchCall[df$PitchCall == "BallIntentional"] <- "BallCalled"
+    # CRITICAL: Use mutate with case_when for robust conversion
+    df <- df %>%
+      mutate(
+        PitchCall = case_when(
+          # Ball conversions
+          PitchCall == "BallIntentional" ~ "BallCalled",
+          PitchCall == "BallInDirt" ~ "BallCalled",
+          PitchCall == "BallinDirt" ~ "BallCalled",  # Handle potential case variations
+          PitchCall == "Ball In Dirt" ~ "BallCalled",  # Handle potential spacing variations
+          
+          # Foul conversions
+          PitchCall == "FoulBallNotFieldable" ~ "FoulBall",
+          PitchCall == "FoulBallFieldable" ~ "FoulBall",
+          
+          # Standardize HomeRun and fix Sinigle
+          PitchCall == "Homerun" ~ "HomeRun",
+          PitchCall == "Sinigle" ~ "Single",
+          
+          # Keep everything else as is
+          TRUE ~ PitchCall
+        )
+      )
+    
+    # Verify conversions
+    cat("\n  After conversion:\n")
+    new_ball_called <- sum(df$PitchCall == "BallCalled", na.rm = TRUE)
+    remaining_ball_in_dirt <- sum(df$PitchCall == "BallInDirt", na.rm = TRUE)
+    remaining_ball_intentional <- sum(df$PitchCall == "BallIntentional", na.rm = TRUE)
+    new_foul_ball <- sum(df$PitchCall == "FoulBall", na.rm = TRUE)
+    
+    cat(sprintf("    - BallCalled: %d (increased by %d)\n", 
+                new_ball_called, new_ball_called - ball_called))
+    cat(sprintf("    - BallIntentional remaining: %d\n", remaining_ball_intentional))
+    cat(sprintf("    - BallInDirt remaining: %d\n", remaining_ball_in_dirt))
+    cat(sprintf("    - FoulBall: %d (increased by %d)\n", 
+                new_foul_ball, new_foul_ball - foul_ball))
+    
+    if (homerun_pitchcall > 0) {
+      cat(sprintf("    - Standardized 'Homerun' → 'HomeRun': %d entries\n", homerun_pitchcall))
+    }
+    if (sinigle_pitchcall > 0) {
+      cat(sprintf("    - Fixed 'Sinigle' → 'Single': %d entries\n", sinigle_pitchcall))
     }
     
-    if (ball_in_dirt > 0) {
-      cat(sprintf("  • BallInDirt: %d → converting to 'BallCalled'\n", ball_in_dirt))
+    # Final verification
+    if (remaining_ball_in_dirt > 0) {
+      cat(sprintf("\n   WARNING: %d BallInDirt entries still remain!\n", remaining_ball_in_dirt))
+      # Force conversion of any remaining
       df$PitchCall[df$PitchCall == "BallInDirt"] <- "BallCalled"
+      cat("    → Forcing conversion of remaining BallInDirt entries\n")
+      
+      # Final check
+      final_ball_in_dirt <- sum(df$PitchCall == "BallInDirt", na.rm = TRUE)
+      if (final_ball_in_dirt == 0) {
+        cat("    All BallInDirt entries successfully converted\n")
+      }
+    } else {
+      cat("  All BallInDirt entries successfully converted\n")
     }
     
-    # Combine Foul variations
-    if (foul_not_fieldable > 0 || foul_fieldable > 0) {
-      cat(sprintf("  • FoulBallNotFieldable: %d → converting to 'FoulBall'\n", foul_not_fieldable))
-      cat(sprintf("  • FoulBallFieldable: %d → converting to 'FoulBall'\n", foul_fieldable))
-      df$PitchCall[df$PitchCall == "FoulBallNotFieldable"] <- "FoulBall"
-      df$PitchCall[df$PitchCall == "FoulBallFieldable"] <- "FoulBall"
+    if (remaining_ball_intentional > 0) {
+      cat(sprintf(" BallIntentional entries still remain!\n", remaining_ball_intentional))
+    } else {
+      cat("   All BallIntentional entries successfully converted\n")
     }
   }
   
   # Step 3: Clean PlayResult column
   if ("PlayResult" %in% names(df)) {
-    cat("\nCleaning PlayResult column:\n")
+    cat("\nStep 3: Cleaning PlayResult column:\n")
     
     # Count before changes
     stolen_base_count <- sum(df$PlayResult == "StolenBase", na.rm = TRUE)
     caught_stealing_count <- sum(df$PlayResult == "CaughtStealing", na.rm = TRUE)
+    # Note: Sinigle already handled above, but check again
+    remaining_sinigle <- sum(df$PlayResult == "Sinigle", na.rm = TRUE)
+    remaining_homerun_lower <- sum(df$PlayResult == "Homerun", na.rm = TRUE)
     
-    # Convert StolenBase and CaughtStealing to Undefined
-    cat(sprintf("  • StolenBase entries: %d → converting to 'Undefined'\n", stolen_base_count))
-    cat(sprintf("  • CaughtStealing entries: %d → converting to 'Undefined'\n", caught_stealing_count))
-    df$PlayResult[df$PlayResult == "StolenBase"] <- "Undefined"
-    df$PlayResult[df$PlayResult == "CaughtStealing"] <- "Undefined"
+    # Use mutate with case_when for consistency
+    df <- df %>%
+      mutate(
+        PlayResult = case_when(
+          PlayResult == "StolenBase" ~ "Undefined",
+          PlayResult == "CaughtStealing" ~ "Undefined",
+          PlayResult == "Sinigle" ~ "Single",  # Double-check
+          PlayResult == "Homerun" ~ "HomeRun",  # Double-check
+          TRUE ~ PlayResult
+        )
+      )
     
-    # Fix Sinigle typo
-    sinigle_count <- sum(df$PlayResult == "Sinigle", na.rm = TRUE)
-    if (sinigle_count > 0) {
-      df$PlayResult[df$PlayResult == "Sinigle"] <- "Single"
-      cat(sprintf("  • Fixed 'Sinigle' → 'Single': %d entries\n", sinigle_count))
+    cat(sprintf("  • StolenBase entries: %d → converted to 'Undefined'\n", stolen_base_count))
+    cat(sprintf("  • CaughtStealing entries: %d → converted to 'Undefined'\n", caught_stealing_count))
+    if (remaining_sinigle > 0) {
+      cat(sprintf("  • Additional 'Sinigle' → 'Single' fixes: %d entries\n", remaining_sinigle))
+    }
+    if (remaining_homerun_lower > 0) {
+      cat(sprintf("  • Additional 'Homerun' → 'HomeRun' standardization: %d entries\n", remaining_homerun_lower))
     }
   }
   
   # Step 4: Clean and consolidate pitch types
   if (all(c("TaggedPitchType", "AutoPitchType") %in% names(df))) {
-    cat("\nCleaning pitch types:\n")
+    cat("\nStep 4: Cleaning pitch types:\n")
     
-    # First replace Undefined with AutoPitchType
+    # Count "Other" pitches before removal
+    other_count <- sum(df$TaggedPitchType == "Other", na.rm = TRUE)
+    if (other_count > 0) {
+      cat(sprintf("  • Removing %d 'Other' pitch type entries\n", other_count))
+      df <- df %>% filter(TaggedPitchType != "Other")
+    }
+    
+    # Count undefined/NA before replacement
     undefined_count <- sum(df$TaggedPitchType == "Undefined" | 
-                           is.na(df$TaggedPitchType) | 
-                           df$TaggedPitchType == "", 
+                             is.na(df$TaggedPitchType) | 
+                             df$TaggedPitchType == "", 
                            na.rm = TRUE)
     
     cat(sprintf("  • Undefined/NA pitch types: %d → using AutoPitchType\n", undefined_count))
     
+    # Store original for reference
+    df$TaggedPitchType_Original <- df$TaggedPitchType
+    
+    # Replace undefined with AutoPitchType and consolidate pitch types
     df <- df %>%
       mutate(
-        TaggedPitchType_Original = TaggedPitchType,
         TaggedPitchType = case_when(
+          # Handle undefined/NA
           TaggedPitchType == "Undefined" ~ AutoPitchType,
           is.na(TaggedPitchType) ~ AutoPitchType,
           TaggedPitchType == "" ~ AutoPitchType,
+          
+          # Consolidate pitch types
+          TaggedPitchType == "TwoSeamFastBall" ~ "Sinker",
+          TaggedPitchType == "FourSeamFastBall" ~ "Fastball",
+          TaggedPitchType == "Four-Seam" ~ "Fastball",
+          TaggedPitchType == "ChangeUp" ~ "Changeup",
+          
+          # Keep everything else
           TRUE ~ TaggedPitchType
         )
       )
     
-    # Combine FourSeamFastBall and Four-Seam to Fastball
-    fourseam_fb_count <- sum(df$TaggedPitchType == "FourSeamFastBall", na.rm = TRUE)
-    fourseam_count <- sum(df$TaggedPitchType == "Four-Seam", na.rm = TRUE)
-    
-    if (fourseam_fb_count > 0 || fourseam_count > 0) {
-      cat(sprintf("\n  • Consolidating fastball variants:\n"))
-      cat(sprintf("    - FourSeamFastBall: %d entries\n", fourseam_fb_count))
-      cat(sprintf("    - Four-Seam: %d entries\n", fourseam_count))
-      
-      df$TaggedPitchType[df$TaggedPitchType == "FourSeamFastBall"] <- "Fastball"
-      df$TaggedPitchType[df$TaggedPitchType == "Four-Seam"] <- "Fastball"
-      
-      cat(sprintf("    → Combined into 'Fastball': %d total entries\n", 
-                  fourseam_fb_count + fourseam_count))
+    # Remove any "Other" that came from AutoPitchType
+    other_from_auto <- sum(df$TaggedPitchType == "Other", na.rm = TRUE)
+    if (other_from_auto > 0) {
+      cat(sprintf("  • Removing %d 'Other' entries from AutoPitchType\n", other_from_auto))
+      df <- df %>% filter(TaggedPitchType != "Other")
     }
     
-    # Combine ChangeUp and Changeup
-    changeup_cap_count <- sum(df$TaggedPitchType == "ChangeUp", na.rm = TRUE)
-    changeup_count <- sum(df$TaggedPitchType == "Changeup", na.rm = TRUE)
-    
-    if (changeup_cap_count > 0) {
-      cat(sprintf("\n  • Consolidating changeup variants:\n"))
-      cat(sprintf("    - ChangeUp: %d entries\n", changeup_cap_count))
-      cat(sprintf("    - Changeup: %d entries\n", changeup_count))
-      
-      # Standardize to "Changeup"
-      df$TaggedPitchType[df$TaggedPitchType == "ChangeUp"] <- "Changeup"
-      
-      cat(sprintf("    → Standardized to 'Changeup': %d total entries\n", 
-                  changeup_cap_count + changeup_count))
-    }
+    # Report consolidations
+    cat("   Pitch type consolidations applied:\n")
+    cat("    - TwoSeamFastBall → Sinker\n")
+    cat("    - FourSeamFastBall & Four-Seam → Fastball\n")
+    cat("    - ChangeUp → Changeup\n")
   }
   
   # Step 5: Filter slow fastballs
   if (all(c("TaggedPitchType", "RelSpeed") %in% names(df))) {
-    cat("\nFiltering velocity outliers:\n")
+    cat("\nStep 5: Filtering velocity outliers:\n")
     
     # Count fastballs below 77 mph
     slow_fastballs <- df %>%
@@ -284,7 +388,54 @@ clean_all_data <- function(df) {
     }
   }
   
+  # Final verification of critical conversions
+  cat("\n========================================\n")
+  cat("FINAL VERIFICATION:\n")
+  
+  if ("PitchCall" %in% names(df)) {
+    problematic_calls <- df %>%
+      filter(PitchCall %in% c("BallInDirt", "BallIntentional", 
+                              "FoulBallFieldable", "FoulBallNotFieldable",
+                              "Homerun", "Sinigle")) %>%  
+      count(PitchCall)
+    
+    if (nrow(problematic_calls) > 0) {
+      cat(" Unconverted PitchCall values found:\n")
+      print(problematic_calls)
+    } else {
+      cat("All PitchCall values properly converted\n")
+    }
+  }
+  
+  if ("PlayResult" %in% names(df)) {
+    problematic_results <- df %>%
+      filter(PlayResult %in% c("Homerun", "Sinigle")) %>%  
+      count(PlayResult)
+    
+    if (nrow(problematic_results) > 0) {
+      cat("Unconverted PlayResult values found:\n")
+      print(problematic_results)
+    } else {
+      cat("All PlayResult values properly standardized\n")
+    }
+  }
+  
+  if ("TaggedPitchType" %in% names(df)) {
+    problematic_types <- df %>%
+      filter(TaggedPitchType %in% c("Other", "TwoSeamFastBall", 
+                                    "FourSeamFastBall", "Four-Seam", "ChangeUp")) %>%
+      count(TaggedPitchType)
+    
+    if (nrow(problematic_types) > 0) {
+      cat("⚠ WARNING: Unconverted pitch types found:\n")
+      print(problematic_types)
+    } else {
+      cat("✓ All pitch types properly consolidated\n")
+    }
+  }
+  
   cat("\n✓ Data cleaning complete\n")
+  cat(sprintf("  Final row count: %d (removed %d rows)\n", nrow(df), original_rows - nrow(df)))
   
   return(df)
 }
@@ -296,7 +447,7 @@ clean_all_data <- function(df) {
 filter_core_metrics <- function(df) {
   
   cat("\n========================================\n")
-  cat("Filtering for velo, spin, IVB, and HB (has to include all of these rows)\n")
+  cat("Filtering for velo, spin, IVB, and HB\n")
   cat("========================================\n\n")
   
   original_rows <- nrow(df)
@@ -311,7 +462,7 @@ filter_core_metrics <- function(df) {
   }
   
   # Show missing data in core columns
-  cat("Missing values in columns:\n")
+  cat("Missing values in core columns:\n")
   for (col in core_required) {
     na_count <- sum(is.na(df[[col]]))
     cat(sprintf("  %-20s: %6d (%.2f%%)\n", 
@@ -338,20 +489,16 @@ filter_core_metrics <- function(df) {
               nrow(df_filtered), nrow(df_filtered)/original_rows*100))
   cat(sprintf("  Columns unchanged:  %8d\n", ncol(df_filtered)))
   
-  cat("\n✓ Filtering complete - kept all columns, filtered rows\n")
+  cat("\nFiltering complete - kept all columns, filtered rows\n")
   
   return(df_filtered)
 }
 
-# ==========================================
-# Data quality testing
-# ==========================================
+# Data quality assessment
+
 
 assess_final_quality <- function(df) {
   
-  cat("\n========================================\n")
-  cat("Final data quality test\n")
-  cat("========================================\n\n")
   
   # Basic info
   cat("Dataset Overview:\n")
@@ -367,7 +514,7 @@ assess_final_quality <- function(df) {
   }
   
   # Core metrics completeness
-  cat("\nCore Metrics Status (100% complete):\n")
+  cat("\nCore Metrics Status (should be 100% complete):\n")
   core_metrics <- c("RelSpeed", "SpinRate", "InducedVertBreak", "HorzBreak")
   for (metric in core_metrics) {
     if (metric %in% names(df)) {
@@ -386,25 +533,30 @@ assess_final_quality <- function(df) {
     }
   }
   
-  # Show PitchCall distribution after cleaning (now includes hit types)
+  # CRITICAL: Verify BallInDirt conversion and HomeRun/Single standardization
+  
   if ("PitchCall" %in% names(df)) {
-    cat("\nPitchCall Distribution (after updates from PlayResult):\n")
+    # Check for any remaining non-standard values
+    ball_in_dirt_count <- sum(df$PitchCall == "BallInDirt", na.rm = TRUE)
+    ball_called_count <- sum(df$PitchCall == "BallCalled", na.rm = TRUE)
+    homerun_lower_count <- sum(df$PitchCall == "Homerun", na.rm = TRUE)
+    homerun_proper_count <- sum(df$PitchCall == "HomeRun", na.rm = TRUE)
+    sinigle_count <- sum(df$PitchCall == "Sinigle", na.rm = TRUE)
+    single_count <- sum(df$PitchCall == "Single", na.rm = TRUE)
+    
+   
+    
+    # Show full PitchCall distribution
+    cat("\nComplete PitchCall Distribution:\n")
     pitch_call_dist <- df %>%
       count(PitchCall) %>%
-      arrange(desc(n)) %>%
-      head(15)
+      arrange(desc(n))
     
-    for (i in 1:nrow(pitch_call_dist)) {
+    for (i in 1:min(nrow(pitch_call_dist), 15)) {
       cat(sprintf("  %-20s: %6d (%.1f%%)\n", 
                   pitch_call_dist$PitchCall[i],
                   pitch_call_dist$n[i],
                   pitch_call_dist$n[i]/nrow(df)*100))
-    }
-    
-    # Check if any InPlay remain
-    remaining_inplay <- sum(df$PitchCall == "InPlay", na.rm = TRUE)
-    if (remaining_inplay > 0) {
-      cat(sprintf("\n  Note: %d InPlay events remain (no PlayResult data)\n", remaining_inplay))
     }
   }
   
@@ -413,14 +565,21 @@ assess_final_quality <- function(df) {
     cat("\nPitch Type Distribution:\n")
     pitch_dist <- df %>%
       count(TaggedPitchType) %>%
-      arrange(desc(n)) %>%
-      head(10)
+      arrange(desc(n))
     
-    for (i in 1:nrow(pitch_dist)) {
+    for (i in 1:min(nrow(pitch_dist), 10)) {
       cat(sprintf("  %-15s: %6d (%.1f%%)\n", 
                   pitch_dist$TaggedPitchType[i],
                   pitch_dist$n[i],
                   pitch_dist$n[i]/nrow(df)*100))
+    }
+    
+    # Check forx pitch types
+    problematic_types <- c("Other", "TwoSeamFastBall", "FourSeamFastBall", "Four-Seam", "ChangeUp")
+    found_problematic <- intersect(problematic_types, df$TaggedPitchType)
+    if (length(found_problematic) > 0) {
+      cat("\n⚠ WARNING: Problematic pitch types still present:\n")
+      cat("  ", paste(found_problematic, collapse = ", "), "\n")
     }
   }
   
@@ -431,10 +590,11 @@ assess_final_quality <- function(df) {
       pull(RelSpeed)
     
     if (length(fastball_velos) > 0) {
-      cat(sprintf("\nFastball velocity check:\n"))
+      cat("\nFastball velocity check:\n")
       cat(sprintf("  Min velocity:  %.1f mph\n", min(fastball_velos)))
       cat(sprintf("  Mean velocity: %.1f ± %.1f mph\n", 
                   mean(fastball_velos), sd(fastball_velos)))
+      cat(sprintf("  Max velocity:  %.1f mph\n", max(fastball_velos)))
     }
   }
   
@@ -442,42 +602,40 @@ assess_final_quality <- function(df) {
 }
 
 # ==========================================
-# Main Pipeline
+# Main Pipeline 
 # ==========================================
 
 run_necbl_pipeline <- function(folder_path = "Navs CSVs", 
-                              save_to_file = TRUE) {
+                               save_to_file = TRUE) {
   
-
-  cat(" NECBL STUFF+ PIPELINE \n")
-  
+  #Pipeline
   
   # Step 1: Combine data
-  cat("STEP 1: Combining all data\n")
+  cat("STEP 1: Combining all CSV files\n")
   cat("========================================\n")
   combined_data <- combine_navs_csvs(folder_path, use_google_drive = TRUE)
   initial_rows <- nrow(combined_data)
   initial_cols <- ncol(combined_data)
   
-  # Step 2: Clean all data
-  cat("\nSTEP 2: comprehensive data cleaning")
+  # Step 2: Clean all data with enhanced BallInDirt handling
+  cat("\nSTEP 2: Comprehensive data cleaning")
   combined_data <- clean_all_data(combined_data)
   
-  # Step 3: Filter for core metrics only
-  cat("\nSTEP 3: Filter for Velo/spin/break")
+  # Step 3: Filter for core metrics
+  cat("\nSTEP 3: Filter for complete core metrics")
   combined_data <- filter_core_metrics(combined_data)
   
   # Step 4: Final quality assessment
-  cat("\nSTEP 4: quality assessment")
+  cat("\nSTEP 4: Final quality assessment")
   assess_final_quality(combined_data)
   
-  # Step 5: Save or return results
+  # Step 5: Save results
   if (save_to_file) {
     cat("\n========================================\n")
     cat("SAVING RESULTS\n")
     cat("========================================\n\n")
     
-    # Save in working directory (no subfolder)
+    # Save main data files
     csv_file <- paste0("necbl_clean_", Sys.Date(), ".csv")
     rds_file <- paste0("necbl_clean_", Sys.Date(), ".rds")
     
@@ -492,29 +650,40 @@ run_necbl_pipeline <- function(folder_path = "Navs CSVs",
     cat("\nFile sizes:\n")
     cat(sprintf("  CSV: %.2f MB\n", file.size(csv_file)/(1024^2)))
     cat(sprintf("  RDS: %.2f MB\n", file.size(rds_file)/(1024^2)))
+    
+    # Save pitcher mapping if it exists
+    pitcher_mapping <- attr(combined_data, "pitcher_mapping")
+    if (!is.null(pitcher_mapping)) {
+      mapping_file <- paste0("pitcher_id_mapping_", Sys.Date(), ".csv")
+      write.csv(pitcher_mapping, mapping_file, row.names = FALSE)
+      cat("  •", mapping_file, "(pitcher ID to name mapping)\n")
+    }
   }
-  
-  # Final summary
-  cat(" PIPELINE COMPLETE \n")
-
   
   cat("TRANSFORMATION SUMMARY:\n")
   cat("----------------------------------------\n")
   cat(sprintf("  Initial:   %d rows × %d columns\n", initial_rows, initial_cols))
   cat(sprintf("  Final:     %d rows × %d columns\n", nrow(combined_data), ncol(combined_data)))
   cat(sprintf("  Retention: %.1f%% of rows\n", nrow(combined_data)/initial_rows*100))
-  cat("\nKey cleaning applied:\n")
-  cat("  ✓ Core metrics complete (RelSpeed, SpinRate, IVB, HB)\n")
-  cat("  ✓ Other columns kept as-is (may have NAs)\n")
-  cat("  ✓ PitchCall 'InPlay' → updated to actual hit type from PlayResult\n")
-  cat("  ✓ BallIntentional & BallInDirt → 'BallCalled'\n")
-  cat("  ✓ FoulBallFieldable & FoulBallNotFieldable → 'FoulBall'\n")
-  cat("  ✓ StolenBase & CaughtStealing → 'Undefined' (in PlayResult)\n")
-  cat("  ✓ Pitch types consolidated\n")
-  cat("  ✓ Fastballs < 77 mph removed\n")
   
-  cat("\n✓ Data ready for Stuff+ modeling!\n\n")
   
+  # Final checks for the specific issues
+  if ("PitchCall" %in% names(combined_data)) {
+    final_ballindirt <- sum(combined_data$PitchCall == "BallInDirt", na.rm = TRUE)
+    final_homerun_lower <- sum(combined_data$PitchCall == "Homerun", na.rm = TRUE)
+    final_sinigle <- sum(combined_data$PitchCall == "Sinigle", na.rm = TRUE)
+    
+    if (final_ballindirt == 0 && final_homerun_lower == 0 && final_sinigle == 0) {
+      cat("\nVERIFIED: All data standardization complete ✓\n")
+    } else {
+      
+      if (final_ballindirt > 0) cat(sprintf("  - %d BallInDirt entries remain\n", final_ballindirt))
+      if (final_homerun_lower > 0) cat(sprintf("  - %d 'Homerun' entries remain\n", final_homerun_lower))
+      if (final_sinigle > 0) cat(sprintf("  - %d 'Sinigle' entries remain\n", final_sinigle))
+    }
+  }
+  
+
   # Store in global environment
   necbl_clean_data <<- combined_data
   cat("Data stored as 'necbl_clean_data' in workspace\n\n")
@@ -523,16 +692,17 @@ run_necbl_pipeline <- function(folder_path = "Navs CSVs",
 }
 
 # ==========================================
-# EXECUTE THE PIPELINE
+# execute pipeline
 # ==========================================
 
-# Run the pipeline - data saved to working directory and workspace
+# Run the enhanced pipeline
 necbl_data <- run_necbl_pipeline(
   folder_path = "Navs CSVs",
-  save_to_file = TRUE  # Set to FALSE if you don't want files
+  save_to_file = TRUE
 )
 
 # Data is now available as:
 # - necbl_data (returned from function)
 # - necbl_clean_data (in global environment)
 # - necbl_clean_[date].csv and .rds files in working directory
+# - pitcher_id_mapping_[date].csv (pitcher ID to name mapping)
