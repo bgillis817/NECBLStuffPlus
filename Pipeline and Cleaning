@@ -12,7 +12,7 @@ options(gargle_oauth_cache = ".secrets")
 drive_auth(cache = ".secrets", email = TRUE)
 
 # ==========================================
-# Data combo from drive folder
+# Data combination from drive folder
 # ==========================================
 
 combine_navs_csvs <- function(folder_path = "Navs CSVs", use_google_drive = TRUE) {
