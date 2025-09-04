@@ -1,0 +1,958 @@
+# Load required libraries
+library(shiny)
+library(shinydashboard)
+library(DT)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(plotly)
+library(httr)
+library(curl)
+
+# Enhanced function to load data from GitHub with column name fixes
+load_github_data <- function(url, filename) {
+  tryCatch({
+    temp_file <- tempfile(fileext = ".rds")
+    response <- curl_download(url, temp_file, quiet = TRUE)
+    data <- readRDS(temp_file)
+    unlink(temp_file)
+    
+    message(paste("Successfully loaded:", filename))
+    return(data)
+  }, error = function(e) {
+    message(paste("Error loading", filename, ":", e$message))
+    return(NULL)
+  })
+}
+
+# Load all data from GitHub with UPDATED FILE NAMES
+load_all_data <- function() {
+  base_url <- "https://github.com/bgillis817/NECBLStuffPlus/raw/main/"
+  
+  data_list <- list(
+    pitching_overall = load_github_data(
+      paste0(base_url, "necbl_pitching_plus_overall_2025-09-01.rds"),
+      "Pitching+ Overall"
+    ),
+    stuff_overall = load_github_data(
+      paste0(base_url, "necbl_stuff_plus_overall_2025-09-05.rds"),
+      "Stuff+ Overall"
+    ),
+    location_overall = load_github_data(
+      paste0(base_url, "necbl_location_plus_overall_2025-09-01.rds"),
+      "Location+ Overall"
+    ),
+    pitching_pitch = load_github_data(
+      paste0(base_url, "necbl_pitching_plus_by_pitch_type_2025-09-01.rds"),
+      "Pitching+ by Pitch"
+    ),
+    stuff_pitch = load_github_data(
+      paste0(base_url, "necbl_stuff_plus_by_pitch_type_2025-09-05.rds"),
+      "Stuff+ by Pitch"
+    ),
+    location_pitch = load_github_data(
+      paste0(base_url, "necbl_location_plus_by_pitch_type_2025-09-01.rds"),
+      "Location+ by Pitch"
+    )
+  )
+  
+  # Remove the situational stuff reference since file doesn't exist
+  
+  # Debug: Check what columns are in stuff_pitch
+  if (!is.null(data_list$stuff_pitch)) {
+    message("Stuff+ pitch columns: ", paste(names(data_list$stuff_pitch), collapse = ", "))
+    message("Sample data rows: ", nrow(data_list$stuff_pitch))
+  }
+  
+  # Standardize pitch type names and handle "Four-Seam" vs "Fastball"
+  standardize_pitch_types <- function(df) {
+    if (!is.null(df) && "TaggedPitchType" %in% names(df)) {
+      df %>%
+        mutate(TaggedPitchType = case_when(
+          TaggedPitchType %in% c("ChangeUp", "changeup") ~ "Changeup",
+          TaggedPitchType == "Four-Seam" ~ "Fastball",  # Standardize Four-Seam to Fastball
+          TRUE ~ as.character(TaggedPitchType)
+        ))
+    } else {
+      df
+    }
+  }
+  
+  # Apply 20 pitch minimum threshold to all datasets
+  apply_pitch_threshold <- function(df, threshold = 20) {
+    if (!is.null(df) && "n_pitches" %in% names(df)) {
+      df %>% filter(n_pitches >= threshold)
+    } else {
+      df
+    }
+  }
+  
+  # Standardize pitch types
+  data_list$pitching_pitch <- standardize_pitch_types(data_list$pitching_pitch)
+  data_list$stuff_pitch <- standardize_pitch_types(data_list$stuff_pitch)
+  data_list$location_pitch <- standardize_pitch_types(data_list$location_pitch)
+  
+  # Apply 20 pitch threshold to all datasets
+  data_list$pitching_overall <- apply_pitch_threshold(data_list$pitching_overall)
+  data_list$stuff_overall <- apply_pitch_threshold(data_list$stuff_overall)
+  data_list$location_overall <- apply_pitch_threshold(data_list$location_overall)
+  data_list$pitching_pitch <- apply_pitch_threshold(data_list$pitching_pitch)
+  data_list$stuff_pitch <- apply_pitch_threshold(data_list$stuff_pitch)
+  data_list$location_pitch <- apply_pitch_threshold(data_list$location_pitch)
+  
+  # Remove duplicate rows
+  remove_duplicates <- function(df) {
+    if (!is.null(df)) {
+      df %>%
+        distinct() %>%
+        # If there are still duplicates with same pitcher/season but different values,
+        # group and take the row with most pitches
+        group_by(Pitcher, Season) %>%
+        slice_max(n_pitches, n = 1, with_ties = FALSE) %>%
+        ungroup()
+    } else {
+      df
+    }
+  }
+  
+  remove_duplicates_by_pitch <- function(df) {
+    if (!is.null(df)) {
+      df %>%
+        distinct() %>%
+        # If there are still duplicates with same pitcher/season/pitch but different values,
+        # group and take the row with most pitches
+        group_by(Pitcher, Season, TaggedPitchType) %>%
+        slice_max(n_pitches, n = 1, with_ties = FALSE) %>%
+        ungroup()
+    } else {
+      df
+    }
+  }
+  
+  # Apply deduplication to overall datasets
+  data_list$pitching_overall <- remove_duplicates(data_list$pitching_overall)
+  data_list$stuff_overall <- remove_duplicates(data_list$stuff_overall)
+  data_list$location_overall <- remove_duplicates(data_list$location_overall)
+  
+  # Apply deduplication to pitch-specific datasets
+  data_list$pitching_pitch <- remove_duplicates_by_pitch(data_list$pitching_pitch)
+  data_list$stuff_pitch <- remove_duplicates_by_pitch(data_list$stuff_pitch)
+  data_list$location_pitch <- remove_duplicates_by_pitch(data_list$location_pitch)
+  
+  return(data_list)
+}
+
+# UI
+ui <- dashboardPage(
+  dashboardHeader(title = "NECBL Pitching Metrics Dashboard"),
+  
+  dashboardSidebar(
+    sidebarMenu(
+      menuItem("Overall Leaderboards", tabName = "overall_leaders", icon = icon("trophy")),
+      menuItem("Complete Rankings", tabName = "complete_rankings", icon = icon("list")),
+      menuItem("Pitch Type Analysis", tabName = "pitch_analysis", icon = icon("baseball")),
+      menuItem("Pitch Type Complete Board", tabName = "pitch_complete", icon = icon("th")),
+      menuItem("Pitch Type Rankings", tabName = "pitch_rankings", icon = icon("chart-bar")),
+      menuItem("Player Search", tabName = "search", icon = icon("search"))
+    ),
+    br(),
+    selectInput("season_filter", "Select Season:",
+                choices = c("2025", "2024", "2023", "2022", "2021"),
+                selected = "2025"),
+    
+    selectInput("team_filter", "Select Team:",
+                choices = c("All Teams" = "All"),
+                selected = "All"),
+    
+    selectInput("handedness_filter", "Select Handedness:",
+                choices = c("All" = "All", "Right" = "Right", "Left" = "Left"),
+                selected = "All")
+  ),
+  
+  dashboardBody(
+    tags$head(
+      tags$style(HTML("
+        .content-wrapper, .right-side {
+          background-color: #f4f4f4;
+        }
+        .box {
+          border-radius: 10px;
+        }
+        .dataTables_wrapper {
+          overflow-x: auto;
+        }
+        table.dataTable thead th {
+          text-align: center !important;
+        }
+      "))
+    ),
+    
+    tabItems(
+      # Overall Leaderboards Tab
+      tabItem(
+        tabName = "overall_leaders",
+        fluidRow(
+          column(4,
+                 box(
+                   title = "Stuff+ Leaders",
+                   status = "success",
+                   solidHeader = TRUE,
+                   width = NULL,
+                   DT::dataTableOutput("stuff_leaders_table")
+                 )
+          ),
+          column(4,
+                 box(
+                   title = "Location+ Leaders", 
+                   status = "warning",
+                   solidHeader = TRUE,
+                   width = NULL,
+                   DT::dataTableOutput("location_leaders_table")
+                 )
+          ),
+          column(4,
+                 box(
+                   title = "Pitching+ Leaders",
+                   status = "danger",
+                   solidHeader = TRUE,
+                   width = NULL,
+                   DT::dataTableOutput("pitching_leaders_table")
+                 )
+          )
+        )
+      ),
+      
+      # Complete Rankings Tab
+      tabItem(
+        tabName = "complete_rankings",
+        fluidRow(
+          box(
+            title = "Complete Pitcher Rankings - All Metrics",
+            status = "primary",
+            solidHeader = TRUE,
+            width = 12,
+            DT::dataTableOutput("complete_rankings_table")
+          )
+        ),
+        fluidRow(
+          box(
+            title = "Metrics Distribution",
+            status = "primary",
+            solidHeader = TRUE,
+            width = 12,
+            plotlyOutput("distribution_plot", height = "400px")
+          )
+        )
+      ),
+      
+      # Pitch Type Analysis Tab
+      tabItem(
+        tabName = "pitch_analysis",
+        fluidRow(
+          box(
+            title = "Select Pitch Type",
+            status = "primary",
+            solidHeader = TRUE,
+            width = 12,
+            selectInput("pitch_type_select", "Pitch Type:",
+                        choices = c("Fastball", "Slider", "Curveball", "Changeup", "Cutter", "Sinker", "Sweeper"),
+                        selected = "Fastball")
+          )
+        ),
+        fluidRow(
+          column(4,
+                 box(
+                   title = "Stuff+ by Pitch Type",
+                   status = "success",
+                   solidHeader = TRUE,
+                   width = NULL,
+                   DT::dataTableOutput("stuff_pitch_type_table")
+                 )
+          ),
+          column(4,
+                 box(
+                   title = "Location+ by Pitch Type",
+                   status = "warning",
+                   solidHeader = TRUE,
+                   width = NULL,
+                   DT::dataTableOutput("location_pitch_type_table")
+                 )
+          ),
+          column(4,
+                 box(
+                   title = "Pitching+ by Pitch Type",
+                   status = "danger",
+                   solidHeader = TRUE,
+                   width = NULL,
+                   DT::dataTableOutput("pitching_pitch_type_table")
+                 )
+          )
+        )
+      ),
+      
+      # Pitch Type Complete Board Tab
+      tabItem(
+        tabName = "pitch_complete",
+        fluidRow(
+          box(
+            title = "Complete Pitch Type Board - All Pitchers, All Pitch Types, All Metrics",
+            status = "primary",
+            solidHeader = TRUE,
+            width = 12,
+            column(12,
+                   p("This table shows every pitcher's metrics for each pitch type they throw."),
+                   br(),
+                   DT::dataTableOutput("pitch_complete_board")
+            )
+          )
+        )
+      ),
+      
+      # Pitch Type Rankings Tab
+      tabItem(
+        tabName = "pitch_rankings",
+        fluidRow(
+          box(
+            title = "Select Pitch Type for Complete Rankings",
+            status = "primary",
+            solidHeader = TRUE,
+            width = 12,
+            selectInput("pitch_type_complete", "Pitch Type:",
+                        choices = c("Fastball", "Slider", "Curveball", "Changeup", "Cutter", "Sinker", "Sweeper"),
+                        selected = "Curveball")
+          )
+        ),
+        fluidRow(
+          box(
+            title = "Complete Pitch Type Rankings",
+            status = "primary",
+            solidHeader = TRUE,
+            width = 12,
+            DT::dataTableOutput("complete_pitch_rankings_table")
+          )
+        ),
+        fluidRow(
+          box(
+            title = "Pitch Type Metrics Comparison",
+            status = "primary",
+            solidHeader = TRUE,
+            width = 12,
+            plotlyOutput("pitch_comparison_plot", height = "400px")
+          )
+        )
+      ),
+      
+      # Player Search Tab
+      tabItem(
+        tabName = "search",
+        fluidRow(
+          box(
+            title = "Player Search",
+            status = "primary",
+            solidHeader = TRUE,
+            width = 12,
+            fluidRow(
+              column(6,
+                     textInput("player_search", "Search for Player:",
+                               placeholder = "Enter player name...")
+              ),
+              column(6,
+                     actionButton("search_button", "Search",
+                                  class = "btn-primary",
+                                  style = "margin-top: 25px;")
+              )
+            )
+          )
+        ),
+        fluidRow(
+          box(
+            title = "Player Details",
+            status = "primary",
+            solidHeader = TRUE,
+            width = 12,
+            uiOutput("player_details")
+          )
+        ),
+        fluidRow(
+          box(
+            title = "Player Pitch Arsenal",
+            status = "primary",
+            solidHeader = TRUE,
+            width = 12,
+            DT::dataTableOutput("player_arsenal")
+          )
+        )
+      )
+    )
+  )
+)
+
+# Server with corrected column names and 20 pitch threshold
+server <- function(input, output, session) {
+  
+  # Load data - already has 20 pitch threshold applied
+  all_data <- reactive({
+    withProgress(message = 'Loading data from GitHub...', value = 0, {
+      incProgress(0.5)
+      data <- load_all_data()
+      incProgress(0.5)
+      data
+    })
+  })
+  
+  # Update team choices based on data
+  observe({
+    data <- all_data()
+    if (!is.null(data$pitching_overall) && "PitcherTeam" %in% names(data$pitching_overall)) {
+      teams <- unique(data$pitching_overall$PitcherTeam)
+      teams <- sort(teams[!is.na(teams)])
+      
+      updateSelectInput(session, "team_filter",
+                        choices = c("All Teams" = "All", teams),
+                        selected = "All")
+    }
+  })
+  
+  # Overall Leaders - replaced pitch count with team display
+  output$stuff_leaders_table <- DT::renderDataTable({
+    data <- all_data()
+    if (is.null(data$stuff_overall)) return(data.frame())
+    
+    leaders <- data$stuff_overall %>%
+      filter(Season == input$season_filter) %>%
+      {if(input$team_filter != "All" && "PitcherTeam" %in% names(.)) 
+        filter(., PitcherTeam == input$team_filter) else .} %>%
+      arrange(desc(stuff_plus)) %>%
+      head(10)
+    
+    # Prepare display columns - show team if available, otherwise show "N/A"
+    display_data <- leaders %>%
+      mutate(Team = ifelse("PitcherTeam" %in% names(.) & !is.na(PitcherTeam), PitcherTeam, "N/A")) %>%
+      select(Pitcher, stuff_plus, Team)
+    
+    datatable(display_data,
+              colnames = c("Pitcher", "Stuff+", "Team"),
+              options = list(pageLength = 10, dom = 't'),
+              rownames = FALSE) %>%
+      formatStyle("stuff_plus",
+                  backgroundColor = styleInterval(
+                    c(70, 75, 80, 85, 90, 95, 100, 105, 110, 115, 120, 125),
+                    c("#d32f2f", "#e53935", "#ef5350", "#e57373", "#ef9a9a", "#ffcdd2", "#ffebee",
+                      "#e8f5e9", "#c8e6c9", "#a5d6a7", "#81c784", "#66bb6a", "#4caf50")
+                  ))
+  })
+  
+  output$location_leaders_table <- DT::renderDataTable({
+    data <- all_data()
+    if (is.null(data$location_overall)) return(data.frame())
+    
+    leaders <- data$location_overall %>%
+      filter(Season == input$season_filter) %>%
+      {if(input$team_filter != "All" && "PitcherTeam" %in% names(.)) 
+        filter(., PitcherTeam == input$team_filter) else .} %>%
+      arrange(desc(location_plus)) %>%
+      head(10)
+    
+    # Prepare display columns - show team if available, otherwise show "N/A"
+    display_data <- leaders %>%
+      mutate(Team = ifelse("PitcherTeam" %in% names(.) & !is.na(PitcherTeam), PitcherTeam, "N/A")) %>%
+      select(Pitcher, location_plus, Team)
+    
+    datatable(display_data,
+              colnames = c("Pitcher", "Location+", "Team"),
+              options = list(pageLength = 10, dom = 't'),
+              rownames = FALSE) %>%
+      formatStyle("location_plus",
+                  backgroundColor = styleInterval(
+                    c(70, 75, 80, 85, 90, 95, 100, 105, 110, 115, 120, 125),
+                    c("#d32f2f", "#e53935", "#ef5350", "#e57373", "#ef9a9a", "#ffcdd2", "#ffebee",
+                      "#e8f5e9", "#c8e6c9", "#a5d6a7", "#81c784", "#66bb6a", "#4caf50")
+                  ))
+  })
+  
+  output$pitching_leaders_table <- DT::renderDataTable({
+    data <- all_data()
+    if (is.null(data$pitching_overall)) return(data.frame())
+    
+    leaders <- data$pitching_overall %>%
+      filter(Season == input$season_filter) %>%
+      {if(input$team_filter != "All" && "PitcherTeam" %in% names(.)) 
+        filter(., PitcherTeam == input$team_filter) else .} %>%
+      arrange(desc(pitching_plus)) %>%
+      head(10)
+    
+    # Prepare display columns - show team if available, otherwise show "N/A"
+    display_data <- leaders %>%
+      mutate(Team = ifelse("PitcherTeam" %in% names(.) & !is.na(PitcherTeam), PitcherTeam, "N/A")) %>%
+      select(Pitcher, pitching_plus, Team)
+    
+    datatable(display_data,
+              colnames = c("Pitcher", "Pitching+", "Team"),
+              options = list(pageLength = 10, dom = 't'),
+              rownames = FALSE) %>%
+      formatStyle("pitching_plus",
+                  backgroundColor = styleInterval(
+                    c(70, 75, 80, 85, 90, 95, 100, 105, 110, 115, 120, 125),
+                    c("#d32f2f", "#e53935", "#ef5350", "#e57373", "#ef9a9a", "#ffcdd2", "#ffebee",
+                      "#e8f5e9", "#c8e6c9", "#a5d6a7", "#81c784", "#66bb6a", "#4caf50")
+                  ))
+  })
+  
+  # Complete Rankings - with corrected joins
+  output$complete_rankings_table <- DT::renderDataTable({
+    data <- all_data()
+    
+    if (is.null(data$pitching_overall) || is.null(data$stuff_overall) || is.null(data$location_overall)) {
+      return(data.frame(Message = "Loading data..."))
+    }
+    
+    pitching_filtered <- data$pitching_overall %>%
+      filter(Season == input$season_filter) %>%
+      {if(input$team_filter != "All" && "PitcherTeam" %in% names(.)) 
+        filter(., PitcherTeam == input$team_filter) else .} %>%
+      select(Pitcher, pitching_plus, n_pitches, any_of("PitcherTeam"))
+    
+    stuff_filtered <- data$stuff_overall %>%
+      filter(Season == input$season_filter) %>%
+      {if(input$team_filter != "All" && "PitcherTeam" %in% names(.)) 
+        filter(., PitcherTeam == input$team_filter) else .} %>%
+      select(Pitcher, stuff_plus)
+    
+    location_filtered <- data$location_overall %>%
+      filter(Season == input$season_filter) %>%
+      {if(input$team_filter != "All" && "PitcherTeam" %in% names(.)) 
+        filter(., PitcherTeam == input$team_filter) else .} %>%
+      select(Pitcher, location_plus)
+    
+    combined <- pitching_filtered %>%
+      left_join(stuff_filtered, by = "Pitcher") %>%
+      left_join(location_filtered, by = "Pitcher") %>%
+      filter(!is.na(stuff_plus) | !is.na(location_plus)) %>%
+      mutate(Team = ifelse("PitcherTeam" %in% names(.) & !is.na(PitcherTeam), PitcherTeam, "N/A")) %>%
+      select(Pitcher, Team, stuff_plus, location_plus, pitching_plus) %>%
+      arrange(desc(pitching_plus))
+    
+    datatable(
+      combined,
+      colnames = c("Pitcher", "Team", "Stuff+", "Location+", "Pitching+"),
+      options = list(
+        pageLength = 25,
+        scrollY = "600px",
+        scrollCollapse = TRUE,
+        dom = 'Bfrtip'
+      ),
+      rownames = FALSE
+    ) %>%
+      formatStyle(
+        columns = c("stuff_plus", "location_plus", "pitching_plus"),
+        backgroundColor = styleInterval(
+          c(70, 75, 80, 85, 90, 95, 100, 105, 110, 115, 120, 125),
+          c("#d32f2f", "#e53935", "#ef5350", "#e57373", "#ef9a9a", "#ffcdd2", "#ffebee",
+            "#e8f5e9", "#c8e6c9", "#a5d6a7", "#81c784", "#66bb6a", "#4caf50")
+        )
+      )
+  })
+  
+  # Complete Pitch Type Rankings
+  output$complete_pitch_rankings_table <- DT::renderDataTable({
+    data <- all_data()
+    
+    if (is.null(data$pitching_pitch) || is.null(data$stuff_pitch) || is.null(data$location_pitch)) {
+      return(data.frame())
+    }
+    
+    pitching_filtered <- data$pitching_pitch %>%
+      filter(Season == input$season_filter,
+             TaggedPitchType == input$pitch_type_complete) %>%
+      {if(input$team_filter != "All" && "PitcherTeam" %in% names(.)) 
+        filter(., PitcherTeam == input$team_filter) else .} %>%
+      select(Pitcher, pitching_plus, n_pitches, any_of("PitcherTeam"))
+    
+    stuff_filtered <- data$stuff_pitch %>%
+      filter(Season == input$season_filter,
+             TaggedPitchType == input$pitch_type_complete) %>%
+      {if(input$team_filter != "All" && "PitcherTeam" %in% names(.)) 
+        filter(., PitcherTeam == input$team_filter) else .} %>%
+      select(Pitcher, stuff_plus)
+    
+    location_filtered <- data$location_pitch %>%
+      filter(Season == input$season_filter,
+             TaggedPitchType == input$pitch_type_complete) %>%
+      {if(input$team_filter != "All" && "PitcherTeam" %in% names(.)) 
+        filter(., PitcherTeam == input$team_filter) else .} %>%
+      select(Pitcher, location_plus)
+    
+    combined <- pitching_filtered %>%
+      left_join(stuff_filtered, by = "Pitcher") %>%
+      left_join(location_filtered, by = "Pitcher") %>%
+      mutate(Team = ifelse("PitcherTeam" %in% names(.) & !is.na(PitcherTeam), PitcherTeam, "N/A")) %>%
+      select(Pitcher, Team, stuff_plus, location_plus, pitching_plus) %>%
+      arrange(desc(pitching_plus))
+    
+    datatable(
+      combined,
+      colnames = c("Pitcher", "Team", "Stuff+", "Location+", "Pitching+"),
+      options = list(
+        pageLength = 25,
+        scrollY = "500px",
+        scrollCollapse = TRUE,
+        dom = 'Bfrtip'
+      ),
+      rownames = FALSE
+    ) %>%
+      formatStyle(
+        columns = c("stuff_plus", "location_plus", "pitching_plus"),
+        backgroundColor = styleInterval(
+          c(70, 75, 80, 85, 90, 95, 100, 105, 110, 115, 120, 125),
+          c("#d32f2f", "#e53935", "#ef5350", "#e57373", "#ef9a9a", "#ffcdd2", "#ffebee",
+            "#e8f5e9", "#c8e6c9", "#a5d6a7", "#81c784", "#66bb6a", "#4caf50")
+        )
+      )
+  })
+  
+  # Pitch Type Complete Board
+  output$pitch_complete_board <- DT::renderDataTable({
+    data <- all_data()
+    
+    if (is.null(data$pitching_pitch) || is.null(data$stuff_pitch) || is.null(data$location_pitch)) {
+      return(data.frame(Message = "Loading data..."))
+    }
+    
+    pitching_pitch_filtered <- data$pitching_pitch %>%
+      filter(Season == input$season_filter) %>%
+      {if(input$team_filter != "All" && "PitcherTeam" %in% names(.)) 
+        filter(., PitcherTeam == input$team_filter) else .} %>%
+      select(Pitcher, TaggedPitchType, pitching_plus, n_pitches, any_of("PitcherTeam"))
+    
+    stuff_pitch_filtered <- data$stuff_pitch %>%
+      filter(Season == input$season_filter) %>%
+      {if(input$team_filter != "All" && "PitcherTeam" %in% names(.)) 
+        filter(., PitcherTeam == input$team_filter) else .} %>%
+      select(Pitcher, TaggedPitchType, stuff_plus)
+    
+    location_pitch_filtered <- data$location_pitch %>%
+      filter(Season == input$season_filter) %>%
+      {if(input$team_filter != "All" && "PitcherTeam" %in% names(.)) 
+        filter(., PitcherTeam == input$team_filter) else .} %>%
+      select(Pitcher, TaggedPitchType, location_plus)
+    
+    combined_pitch <- pitching_pitch_filtered %>%
+      inner_join(stuff_pitch_filtered, by = c("Pitcher", "TaggedPitchType")) %>%
+      inner_join(location_pitch_filtered, by = c("Pitcher", "TaggedPitchType")) %>%
+      mutate(
+        Team = ifelse("PitcherTeam" %in% names(.) & !is.na(PitcherTeam), PitcherTeam, "N/A"),
+        stuff_plus = round(stuff_plus, 1),
+        location_plus = round(location_plus, 1),
+        pitching_plus = round(pitching_plus, 1)
+      ) %>%
+      select(Pitcher, TaggedPitchType, Team, stuff_plus, location_plus, pitching_plus) %>%
+      arrange(Pitcher, TaggedPitchType)
+    
+    datatable(
+      combined_pitch,
+      colnames = c("Pitcher", "Pitch Type", "Team", "Stuff+", "Location+", "Pitching+"),
+      options = list(
+        pageLength = 50,
+        scrollY = "600px",
+        scrollCollapse = TRUE,
+        dom = 'Bfrtip',
+        buttons = c('copy', 'csv', 'excel')
+      ),
+      rownames = FALSE,
+      filter = 'top'
+    ) %>%
+      formatStyle(
+        columns = c("stuff_plus", "location_plus", "pitching_plus"),
+        backgroundColor = styleInterval(
+          c(70, 75, 80, 85, 90, 95, 100, 105, 110, 115, 120, 125),
+          c("#d32f2f", "#e53935", "#ef5350", "#e57373", "#ef9a9a", "#ffcdd2", "#ffebee",
+            "#e8f5e9", "#c8e6c9", "#a5d6a7", "#81c784", "#66bb6a", "#4caf50")
+        )
+      )
+  })
+  
+  # Pitch Type Tables - replaced pitch count with team display
+  output$stuff_pitch_type_table <- DT::renderDataTable({
+    data <- all_data()
+    if (is.null(data$stuff_pitch)) return(data.frame())
+    
+    filtered <- data$stuff_pitch %>%
+      filter(Season == input$season_filter,
+             TaggedPitchType == input$pitch_type_select) %>%
+      {if(input$team_filter != "All" && "PitcherTeam" %in% names(.)) 
+        filter(., PitcherTeam == input$team_filter) else .} %>%
+      arrange(desc(stuff_plus)) %>%
+      head(15) %>%
+      mutate(Team = ifelse("PitcherTeam" %in% names(.) & !is.na(PitcherTeam), PitcherTeam, "N/A")) %>%
+      select(Pitcher, stuff_plus, Team)
+    
+    datatable(filtered,
+              colnames = c("Pitcher", "Stuff+", "Team"),
+              options = list(pageLength = 15, dom = 't'),
+              rownames = FALSE) %>%
+      formatStyle("stuff_plus",
+                  backgroundColor = styleInterval(
+                    c(70, 75, 80, 85, 90, 95, 100, 105, 110, 115, 120, 125),
+                    c("#d32f2f", "#e53935", "#ef5350", "#e57373", "#ef9a9a", "#ffcdd2", "#ffebee",
+                      "#e8f5e9", "#c8e6c9", "#a5d6a7", "#81c784", "#66bb6a", "#4caf50")
+                  ))
+  })
+  
+  output$location_pitch_type_table <- DT::renderDataTable({
+    data <- all_data()
+    if (is.null(data$location_pitch)) return(data.frame())
+    
+    filtered <- data$location_pitch %>%
+      filter(Season == input$season_filter,
+             TaggedPitchType == input$pitch_type_select) %>%
+      {if(input$team_filter != "All" && "PitcherTeam" %in% names(.)) 
+        filter(., PitcherTeam == input$team_filter) else .} %>%
+      arrange(desc(location_plus)) %>%
+      head(15) %>%
+      mutate(Team = ifelse("PitcherTeam" %in% names(.) & !is.na(PitcherTeam), PitcherTeam, "N/A")) %>%
+      select(Pitcher, location_plus, Team)
+    
+    datatable(filtered,
+              colnames = c("Pitcher", "Location+", "Team"),
+              options = list(pageLength = 15, dom = 't'),
+              rownames = FALSE) %>%
+      formatStyle("location_plus",
+                  backgroundColor = styleInterval(
+                    c(70, 75, 80, 85, 90, 95, 100, 105, 110, 115, 120, 125),
+                    c("#d32f2f", "#e53935", "#ef5350", "#e57373", "#ef9a9a", "#ffcdd2", "#ffebee",
+                      "#e8f5e9", "#c8e6c9", "#a5d6a7", "#81c784", "#66bb6a", "#4caf50")
+                  ))
+  })
+  
+  output$pitching_pitch_type_table <- DT::renderDataTable({
+    data <- all_data()
+    if (is.null(data$pitching_pitch)) return(data.frame())
+    
+    filtered <- data$pitching_pitch %>%
+      filter(Season == input$season_filter,
+             TaggedPitchType == input$pitch_type_select) %>%
+      {if(input$team_filter != "All" && "PitcherTeam" %in% names(.)) 
+        filter(., PitcherTeam == input$team_filter) else .} %>%
+      arrange(desc(pitching_plus)) %>%
+      head(15) %>%
+      mutate(Team = ifelse("PitcherTeam" %in% names(.) & !is.na(PitcherTeam), PitcherTeam, "N/A")) %>%
+      select(Pitcher, pitching_plus, Team)
+    
+    datatable(filtered,
+              colnames = c("Pitcher", "Pitching+", "Team"),
+              options = list(pageLength = 15, dom = 't'),
+              rownames = FALSE) %>%
+      formatStyle("pitching_plus",
+                  backgroundColor = styleInterval(
+                    c(70, 75, 80, 85, 90, 95, 100, 105, 110, 115, 120, 125),
+                    c("#d32f2f", "#e53935", "#ef5350", "#e57373", "#ef9a9a", "#ffcdd2", "#ffebee",
+                      "#e8f5e9", "#c8e6c9", "#a5d6a7", "#81c784", "#66bb6a", "#4caf50")
+                  ))
+  })
+  
+  # Distribution plot
+  output$distribution_plot <- renderPlotly({
+    data <- all_data()
+    
+    if (is.null(data$pitching_overall) || is.null(data$stuff_overall) || is.null(data$location_overall)) {
+      return(NULL)
+    }
+    
+    pitching_data <- data$pitching_overall %>%
+      filter(Season == input$season_filter) %>%
+      {if(input$team_filter != "All" && "PitcherTeam" %in% names(.)) 
+        filter(., PitcherTeam == input$team_filter) else .} %>%
+      select(pitching_plus) %>%
+      mutate(Metric = "Pitching+")
+    
+    stuff_data <- data$stuff_overall %>%
+      filter(Season == input$season_filter) %>%
+      {if(input$team_filter != "All" && "PitcherTeam" %in% names(.)) 
+        filter(., PitcherTeam == input$team_filter) else .} %>%
+      select(stuff_plus) %>%
+      rename(pitching_plus = stuff_plus) %>%
+      mutate(Metric = "Stuff+")
+    
+    location_data <- data$location_overall %>%
+      filter(Season == input$season_filter) %>%
+      {if(input$team_filter != "All" && "PitcherTeam" %in% names(.)) 
+        filter(., PitcherTeam == input$team_filter) else .} %>%
+      select(location_plus) %>%
+      rename(pitching_plus = location_plus) %>%
+      mutate(Metric = "Location+")
+    
+    combined_dist <- rbind(pitching_data, stuff_data, location_data)
+    
+    p <- plot_ly(combined_dist, x = ~pitching_plus, color = ~Metric, type = "histogram",
+                 colors = c("Pitching+" = "#dc3545", "Stuff+" = "#28a745", "Location+" = "#ffc107")) %>%
+      layout(
+        title = paste("Metrics Distribution -", input$season_filter),
+        xaxis = list(title = "Score"),
+        yaxis = list(title = "Count"),
+        barmode = "overlay"
+      )
+    
+    p
+  })
+  
+  # Pitch comparison plot - only for pitchers with all three metrics for that pitch type
+  output$pitch_comparison_plot <- renderPlotly({
+    data <- all_data()
+    
+    if (is.null(data$pitching_pitch) || is.null(data$stuff_pitch) || is.null(data$location_pitch)) {
+      return(NULL)
+    }
+    
+    # Get pitchers who have all three metrics for this pitch type
+    pitching_filtered <- data$pitching_pitch %>%
+      filter(Season == input$season_filter,
+             TaggedPitchType == input$pitch_type_complete) %>%
+      {if(input$team_filter != "All" && "PitcherTeam" %in% names(.)) 
+        filter(., PitcherTeam == input$team_filter) else .} %>%
+      select(Pitcher, pitching_plus)
+    
+    stuff_filtered <- data$stuff_pitch %>%
+      filter(Season == input$season_filter,
+             TaggedPitchType == input$pitch_type_complete) %>%
+      {if(input$team_filter != "All" && "PitcherTeam" %in% names(.)) 
+        filter(., PitcherTeam == input$team_filter) else .} %>%
+      select(Pitcher, stuff_plus)
+    
+    location_filtered <- data$location_pitch %>%
+      filter(Season == input$season_filter,
+             TaggedPitchType == input$pitch_type_complete) %>%
+      {if(input$team_filter != "All" && "PitcherTeam" %in% names(.)) 
+        filter(., PitcherTeam == input$team_filter) else .} %>%
+      select(Pitcher, location_plus)
+    
+    # Find complete records
+    complete_pitchers <- pitching_filtered %>%
+      inner_join(stuff_filtered, by = "Pitcher") %>%
+      inner_join(location_filtered, by = "Pitcher") %>%
+      pull(Pitcher)
+    
+    # Filter to only complete records
+    filtered_data <- data$pitching_pitch %>%
+      filter(Season == input$season_filter,
+             TaggedPitchType == input$pitch_type_complete,
+             Pitcher %in% complete_pitchers) %>%
+      {if(input$team_filter != "All" && "PitcherTeam" %in% names(.)) 
+        filter(., PitcherTeam == input$team_filter) else .}
+    
+    if (nrow(filtered_data) > 0) {
+      p <- plot_ly(filtered_data, x = ~pitching_plus, type = "histogram",
+                   name = paste(input$pitch_type_complete, "Pitching+"),
+                   marker = list(color = "#667eea")) %>%
+        layout(
+          title = paste(input$pitch_type_complete, "Pitching+ Distribution -", input$season_filter),
+          xaxis = list(title = "Pitching+ Score"),
+          yaxis = list(title = "Count")
+        )
+      p
+    }
+  })
+  
+  # Player search
+  observeEvent(input$search_button, {
+    data <- all_data()
+    
+    if (is.null(data$pitching_overall)) return()
+    
+    search_term <- tolower(input$player_search)
+    
+    matching_players <- data$pitching_overall %>%
+      filter(grepl(search_term, tolower(Pitcher))) %>%
+      filter(Season == input$season_filter)
+    
+    if (nrow(matching_players) > 0) {
+      player_name <- matching_players$Pitcher[1]
+      
+      output$player_details <- renderUI({
+        pitching_metrics <- data$pitching_overall %>%
+          filter(Pitcher == player_name, Season == input$season_filter)
+        
+        stuff_metrics <- data$stuff_overall %>%
+          filter(Pitcher == player_name, Season == input$season_filter)
+        
+        location_metrics <- data$location_overall %>%
+          filter(Pitcher == player_name, Season == input$season_filter)
+        
+        team_info <- if("PitcherTeam" %in% names(pitching_metrics) && nrow(pitching_metrics) > 0) {
+          tags$p(paste("Team:", pitching_metrics$PitcherTeam[1]))
+        } else {
+          NULL
+        }
+        
+        tags$div(
+          h4(player_name),
+          tags$p(paste("Season:", input$season_filter)),
+          team_info,
+          tags$p(paste("Stuff+:", ifelse(nrow(stuff_metrics) > 0, round(stuff_metrics$stuff_plus[1], 1), "N/A"))),
+          tags$p(paste("Location+:", ifelse(nrow(location_metrics) > 0, round(location_metrics$location_plus[1], 1), "N/A"))),
+          tags$p(paste("Pitching+:", ifelse(nrow(pitching_metrics) > 0, round(pitching_metrics$pitching_plus[1], 1), "N/A")))
+        )
+      })
+      
+      output$player_arsenal <- DT::renderDataTable({
+        arsenal <- data$pitching_pitch %>%
+          filter(Pitcher == player_name, Season == input$season_filter) %>%
+          select(TaggedPitchType, n_pitches, pitching_plus, any_of("PitcherTeam"))
+        
+        stuff_arsenal <- data$stuff_pitch %>%
+          filter(Pitcher == player_name, Season == input$season_filter) %>%
+          select(TaggedPitchType, stuff_plus)
+        
+        location_arsenal <- data$location_pitch %>%
+          filter(Pitcher == player_name, Season == input$season_filter) %>%
+          select(TaggedPitchType, location_plus)
+        
+        combined_arsenal <- arsenal %>%
+          left_join(stuff_arsenal, by = "TaggedPitchType") %>%
+          left_join(location_arsenal, by = "TaggedPitchType") %>%
+          mutate(Team = ifelse("PitcherTeam" %in% names(.) & !is.na(PitcherTeam), PitcherTeam, "N/A")) %>%
+          select(TaggedPitchType, Team, stuff_plus, location_plus, pitching_plus)
+        
+        datatable(combined_arsenal,
+                  colnames = c("Pitch Type", "Team", "Stuff+", "Location+", "Pitching+"),
+                  options = list(pageLength = 10),
+                  rownames = FALSE) %>%
+          formatStyle(
+            columns = c("stuff_plus", "location_plus", "pitching_plus"),
+            backgroundColor = styleInterval(
+              c(70, 75, 80, 85, 90, 95, 100, 105, 110, 115, 120, 125),
+              c("#d32f2f", "#e53935", "#ef5350", "#e57373", "#ef9a9a", "#ffcdd2", "#ffebee",
+                "#e8f5e9", "#c8e6c9", "#a5d6a7", "#81c784", "#66bb6a", "#4caf50")
+            )
+          )
+      })
+    } else {
+      output$player_details <- renderUI({
+        tags$p("No player found matching your search.")
+      })
+    }
+  })
+  
+  # Update pitch type choices based on actual data - including Sweeper
+  observe({
+    data <- all_data()
+    if (!is.null(data$pitching_pitch)) {
+      pitch_types <- unique(data$pitching_pitch$TaggedPitchType)
+      pitch_types <- sort(pitch_types[!is.na(pitch_types)])
+      
+      # Ensure Sweeper is included in the choices
+      all_pitch_types <- unique(c(pitch_types, "Sweeper"))
+      all_pitch_types <- sort(all_pitch_types)
+      
+      updateSelectInput(session, "pitch_type_complete",
+                        choices = all_pitch_types,
+                        selected = if("Curveball" %in% all_pitch_types) "Curveball" else all_pitch_types[1])
+      
+      updateSelectInput(session, "pitch_type_select",
+                        choices = all_pitch_types,
+                        selected = if("Fastball" %in% all_pitch_types) "Fastball" else all_pitch_types[1])
+    }
+  })
+}
+
+# Run the app
+shinyApp(ui = ui, server = server)
