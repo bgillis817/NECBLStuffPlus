@@ -1,0 +1,477 @@
+library(tidyverse)
+library(randomForest)
+library(caret)
+library(ggplot2)
+library(bit64)
+set.seed(42)
+
+# ==========================================
+# Data Prep
+# ==========================================
+
+prepare_stuff_data <- function(df) {
+  cat("NECBL Stuff+ Data Preparation \n")
+  cat("==============================================\n")
+  
+  # integer64 PitcherId to character
+  if (class(df$PitcherId)[1] == "integer64") {
+    cat("Converting PitcherId from integer64 to character...\n")
+    df$PitcherId <- as.character(df$PitcherId)
+  }
+  
+  # Extract season information prior to filtering
+  if ("Date" %in% names(df)) {
+    df <- df %>%
+      mutate(
+        Date = as.Date(Date, format = "%m/%d/%Y"),
+        Season = as.character(format(Date, "%Y"))
+      )
+    cat("Seasons found in data:", paste(unique(df$Season), collapse = ", "), "\n")
+  } else {
+    df$Season <- "2025"
+    cat("No Date column found - defaulting to 2025 season\n")
+  }
+  
+  # Store pitcher names, team, and season before any filtering
+  pitcher_name_map <- df %>%
+    select(PitcherId, Pitcher, PitcherTeam, Season) %>%
+    distinct() %>%
+    filter(!is.na(Pitcher), Pitcher != "")
+  
+  cat(sprintf("Preserved %d pitcher-team-season combinations\n", nrow(pitcher_name_map)))
+  
+  # Show teams found
+  if ("PitcherTeam" %in% names(df)) {
+    teams <- unique(df$PitcherTeam)
+    cat("Teams found:", paste(teams[!is.na(teams)], collapse = ", "), "\n")
+  }
+  
+  # Remove problematic values
+  df <- df %>%
+    filter(
+      !is.na(TaggedPitchType),
+      TaggedPitchType != "Other",
+      TaggedPitchType != "Undefined",
+      PitchCall != "Undefined",
+      PitchCall != "BallIntentional",
+      !is.na(SpinRate),
+      !is.na(RelSpeed),
+      !is.na(InducedVertBreak),
+      !is.na(HorzBreak),
+      !is.na(Extension),      # Additional for Stuff+
+      !is.na(RelHeight),       # Additional for Stuff+
+      !is.na(RelSide)          # Additional for Stuff+
+    )
+  
+  # Standardize pitch outcomes
+  df <- df %>%
+    mutate(
+      PitchCall = case_when(
+        PitchCall == "Homerun" ~ "HomeRun",
+        PitchCall == "Sinigle" ~ "Single",
+        TRUE ~ PitchCall
+      ),
+      PitchCall = case_when(
+        PitchCall == "InPlay" & PlayResult %in% c("Single", "Double", "Triple", "HomeRun") ~ PlayResult,
+        PitchCall == "InPlay" ~ "Out",
+        PitchCall %in% c("StrikeCalled", "StikeCalled", "Strikecalled") ~ "StrikeCalled",
+        PitchCall %in% c("BallInDirt", "BallinDirt", "BallIntentional") ~ "BallCalled",
+        PitchCall %in% c("FoulBall", "FoulBallNotFieldable", "FoulBallFieldable") ~ "Foul",
+        PitchCall == "FieldersChoice" ~ "Out",
+        PitchCall == "Sacrifice" ~ "Out",
+        TRUE ~ PitchCall
+      ),
+      PitcherThrows = ifelse(PitcherThrows == "RIght", "Right", PitcherThrows),
+      BatterSide = ifelse(BatterSide == "RIght", "Right", BatterSide)
+    ) %>%
+    filter(
+      PitcherThrows %in% c("Left", "Right"),
+      BatterSide %in% c("Left", "Right")
+    )
+  
+  # Handle missing values in Balls and Strikes
+  if (!"Balls" %in% names(df)) {
+    df$Balls <- 0
+    cat("Created Balls column with default value 0\n")
+  }
+  if (!"Strikes" %in% names(df)) {
+    df$Strikes <- 0
+    cat("Created Strikes column with default value 0\n")
+  }
+  
+  # Convert to factors
+  df <- df %>%
+    mutate(
+      Balls = factor(pmin(as.numeric(as.character(Balls)), 3), levels = c(0,1,2,3), ordered = TRUE),
+      Strikes = factor(pmin(as.numeric(as.character(Strikes)), 2), levels = c(0,1,2), ordered = TRUE),
+      PitchCall = factor(PitchCall),
+      PitcherThrows = factor(PitcherThrows, levels = c("Left", "Right")),
+      BatterSide = factor(BatterSide, levels = c("Left", "Right")),
+      TaggedPitchType = as.factor(TaggedPitchType)
+    )
+  
+  # Attach pitcher names as attribute
+  attr(df, "pitcher_names") <- pitcher_name_map
+  
+  cat(sprintf("Cleaned data: %d pitches\n", nrow(df)))
+  
+  return(df)
+}
+
+# BUILD STUFF+ MODEL
+
+
+build_stuff_plus_model <- function(df) {
+  cat("\n\nBuilding NECBL Stuff+ Model \n")
+  cat("===================================================\n\n")
+  
+  # Preserve pitcher names attribute
+  pitcher_names <- attr(df, "pitcher_names")
+  
+  # 70/30 train/validation split
+  set.seed(2425)
+  train_index <- createDataPartition(df$PitchCall, p = 0.7, list = FALSE)
+  train <- df[train_index, ]
+  vali <- df[-train_index, ]
+  
+  cat(sprintf("Training set (for model building): %d pitches\n", nrow(train)))
+  cat(sprintf("Validation set (for model evaluation): %d pitches\n\n", nrow(vali)))
+  
+  # Build formula 
+  model_formula <- as.formula("PitchCall ~ RelSpeed + SpinRate + InducedVertBreak + HorzBreak + Extension + RelHeight + RelSide")
+  
+  # Add approach angles
+  if (all(c("VertApprAngle", "HorzApprAngle") %in% names(df))) {
+    model_formula <- as.formula("PitchCall ~ RelSpeed + SpinRate + InducedVertBreak + HorzBreak + Extension + RelHeight + RelSide + VertApprAngle + HorzApprAngle")
+    cat("Including approach angles in model\n")
+  }
+  
+  # Build Random Forest
+  rf_model <- randomForest(
+    model_formula,
+    data = train,
+    ntree = 250,
+    mtry = floor(sqrt(length(all.vars(model_formula)) - 1)),
+    importance = TRUE
+  )
+  
+  print(rf_model)
+  
+  # Validation
+  rf_pred_vali <- predict(rf_model, newdata = vali)
+  
+  # Calculate metrics on validation set
+  conf_matrix <- confusionMatrix(rf_pred_vali, vali$PitchCall)
+  cat("\nValidation Set Accuracy:", round(conf_matrix$overall["Accuracy"], 4), "\n")
+  
+  # Apply to all pitches
+  cat("\nApplying model to entire dataset...\n")
+  rf_prob_all <- predict(rf_model, newdata = df, type = "prob")
+  cat(sprintf("Scored all %d pitches in dataset\n", nrow(df)))
+  
+  return(list(
+    model = rf_model,
+    full_data = df,  # Return full dataset
+    full_prob = rf_prob_all,  # Predictions for ALL pitches
+    pitcher_names = pitcher_names
+  ))
+}
+
+# Run Values
+
+calculate_run_values <- function(prob_df, strikes) {
+  weights <- list(
+    ball_01 = 0.056,
+    strike_01 = -0.089,
+    foul_01 = -0.089,
+    ball_2 = 0.056,
+    strike_2 = -0.089,
+    foul_2 = 0,
+    out = -0.26,
+    single = 0.44,
+    double = 0.75,
+    triple = 1.01,
+    homerun = 1.40,
+    hbp = 0.31
+  )
+  
+  n <- nrow(prob_df)
+  xRunValue <- numeric(n)
+  
+  for (i in 1:n) {
+    s <- as.numeric(as.character(strikes[i]))
+    if (is.na(s)) s <- 0
+    
+    if (s < 2) {
+      xRunValue[i] <- 
+        ifelse("BallCalled" %in% names(prob_df), prob_df$BallCalled[i] * weights$ball_01, 0) +
+        ifelse("StrikeCalled" %in% names(prob_df), prob_df$StrikeCalled[i] * weights$strike_01, 0) +
+        ifelse("StrikeSwinging" %in% names(prob_df), prob_df$StrikeSwinging[i] * weights$strike_01, 0) +
+        ifelse("Foul" %in% names(prob_df), prob_df$Foul[i] * weights$foul_01, 0) +
+        ifelse("Out" %in% names(prob_df), prob_df$Out[i] * weights$out, 0) +
+        ifelse("Single" %in% names(prob_df), prob_df$Single[i] * weights$single, 0) +
+        ifelse("Double" %in% names(prob_df), prob_df$Double[i] * weights$double, 0) +
+        ifelse("Triple" %in% names(prob_df), prob_df$Triple[i] * weights$triple, 0) +
+        ifelse("HomeRun" %in% names(prob_df), prob_df$HomeRun[i] * weights$homerun, 0) +
+        ifelse("HitByPitch" %in% names(prob_df), prob_df$HitByPitch[i] * weights$hbp, 0)
+    } else {
+      xRunValue[i] <- 
+        ifelse("BallCalled" %in% names(prob_df), prob_df$BallCalled[i] * weights$ball_2, 0) +
+        ifelse("StrikeCalled" %in% names(prob_df), prob_df$StrikeCalled[i] * weights$strike_2, 0) +
+        ifelse("StrikeSwinging" %in% names(prob_df), prob_df$StrikeSwinging[i] * weights$strike_2, 0) +
+        ifelse("Foul" %in% names(prob_df), prob_df$Foul[i] * weights$foul_2, 0) +
+        ifelse("Out" %in% names(prob_df), prob_df$Out[i] * weights$out, 0) +
+        ifelse("Single" %in% names(prob_df), prob_df$Single[i] * weights$single, 0) +
+        ifelse("Double" %in% names(prob_df), prob_df$Double[i] * weights$double, 0) +
+        ifelse("Triple" %in% names(prob_df), prob_df$Triple[i] * weights$triple, 0) +
+        ifelse("HomeRun" %in% names(prob_df), prob_df$HomeRun[i] * weights$homerun, 0) +
+        ifelse("HitByPitch" %in% names(prob_df), prob_df$HitByPitch[i] * weights$hbp, 0)
+    }
+  }
+  
+  return(xRunValue)
+}
+
+# ==========================================
+# Arsenal-wide stuff+
+# ==========================================
+
+calculate_stuff_plus <- function(model_results) {
+  cat("\n\nCalculating Stuff+ Scores\n")
+  cat("========================================\n\n")
+  
+  # Use FULL dataset instead of just validation
+  full_data <- model_results$full_data
+  rf_prob <- as.data.frame(model_results$full_prob)
+  pitcher_names <- model_results$pitcher_names
+  
+  # Ensure PitcherId is character type
+  full_data$PitcherId <- as.character(full_data$PitcherId)
+  pitcher_names$PitcherId <- as.character(pitcher_names$PitcherId)
+  
+  # Add actual run values
+  full_data <- full_data %>%
+    mutate(
+      ActualRunValue = case_when(
+        Strikes %in% c(0, 1) & PitchCall == "BallCalled" ~ 0.056,
+        Strikes %in% c(0, 1) & PitchCall %in% c("StrikeCalled", "StrikeSwinging", "Foul") ~ -0.089,
+        Strikes == 2 & PitchCall == "BallCalled" ~ 0.056,
+        Strikes == 2 & PitchCall %in% c("StrikeCalled", "StrikeSwinging") ~ -0.089,
+        Strikes == 2 & PitchCall == "Foul" ~ 0,
+        PitchCall == "Out" ~ -0.26,
+        PitchCall == "Single" ~ 0.44,
+        PitchCall == "Double" ~ 0.75,
+        PitchCall == "Triple" ~ 1.01,
+        PitchCall == "HomeRun" ~ 1.40,
+        PitchCall == "HitByPitch" ~ 0.31,
+        TRUE ~ 0
+      )
+    )
+  
+  # Calculate expected run values
+  full_data$xRunValue <- calculate_run_values(rf_prob, full_data$Strikes)
+  
+  # Aggregate by pitcher using ALL their pitches
+  pitcher_summary <- full_data %>%
+    mutate(PitcherId = as.character(PitcherId)) %>%
+    group_by(PitcherId, PitcherTeam, Season) %>%
+    summarise(
+      n_pitches = n(),
+      avg_actual_rv = mean(ActualRunValue, na.rm = TRUE),
+      avg_expected_rv = mean(xRunValue, na.rm = TRUE),
+      .groups = "drop"
+    )
+  
+  cat(sprintf("Total pitchers scored: %d\n", nrow(pitcher_summary)))
+  cat(sprintf("Total pitches scored: %d\n", sum(pitcher_summary$n_pitches)))
+  
+  # Calculate league statistics
+  league_mean <- mean(pitcher_summary$avg_expected_rv)
+  league_sd <- sd(pitcher_summary$avg_expected_rv)
+  
+  # Calculate Stuff+ scores
+  pitcher_summary <- pitcher_summary %>%
+    mutate(
+      z_score = (avg_expected_rv - league_mean) / league_sd,
+      stuff_plus = round(100 - (z_score * 10), 1),
+      percentile = round(percent_rank(stuff_plus) * 100, 1)
+    )
+  
+  # JOIN PITCHER NAMES WITH TEAM
+  pitcher_summary <- pitcher_summary %>%
+    left_join(pitcher_names, by = c("PitcherId", "PitcherTeam", "Season")) %>%
+    select(PitcherId, Pitcher, PitcherTeam, Season, n_pitches, 
+           stuff_plus, percentile) %>%
+    arrange(desc(stuff_plus))
+  
+  # Verify scale
+  cat("\nStuff+ Scale Verification:\n")
+  cat(sprintf("  Mean:    %.1f (should be ~100)\n", mean(pitcher_summary$stuff_plus)))
+  cat(sprintf("  Std Dev: %.1f (should be ~10)\n", sd(pitcher_summary$stuff_plus)))
+  
+  return(pitcher_summary)
+}
+
+
+# Individual Pitch Type Scores
+
+calculate_stuff_plus_by_pitch <- function(model_results) {
+  cat("\n\nCalculating Stuff+ by Pitch Type\n")
+  cat("===============================================\n\n")
+  
+  full_data <- model_results$full_data
+  rf_prob <- as.data.frame(model_results$full_prob)
+  pitcher_names <- model_results$pitcher_names
+  
+  full_data$PitcherId <- as.character(full_data$PitcherId)
+  pitcher_names$PitcherId <- as.character(pitcher_names$PitcherId)
+  
+  # Add actual run values
+  full_data <- full_data %>%
+    mutate(
+      ActualRunValue = case_when(
+        Strikes %in% c(0, 1) & PitchCall == "BallCalled" ~ 0.056,
+        Strikes %in% c(0, 1) & PitchCall %in% c("StrikeCalled", "StrikeSwinging", "Foul") ~ -0.089,
+        Strikes == 2 & PitchCall == "BallCalled" ~ 0.056,
+        Strikes == 2 & PitchCall %in% c("StrikeCalled", "StrikeSwinging") ~ -0.089,
+        Strikes == 2 & PitchCall == "Foul" ~ 0,
+        PitchCall == "Out" ~ -0.26,
+        PitchCall == "Single" ~ 0.44,
+        PitchCall == "Double" ~ 0.75,
+        PitchCall == "Triple" ~ 1.01,
+        PitchCall == "HomeRun" ~ 1.40,
+        PitchCall == "HitByPitch" ~ 0.31,
+        TRUE ~ 0
+      )
+    )
+  
+  full_data$xRunValue <- calculate_run_values(rf_prob, full_data$Strikes)
+  
+  # CRITICAL: First calculate OVERALL league mean and SD (same as overall function)
+  overall_league_stats <- full_data %>%
+    group_by(PitcherId, PitcherTeam, Season) %>%
+    summarise(
+      avg_expected_rv = mean(xRunValue, na.rm = TRUE),
+      .groups = "drop"
+    )
+  
+  league_mean <- mean(overall_league_stats$avg_expected_rv)
+  league_sd <- sd(overall_league_stats$avg_expected_rv)
+  
+  cat(sprintf("Using unified league baseline: Mean = %.4f, SD = %.4f\n", league_mean, league_sd))
+  
+  # Now aggregate by pitcher AND pitch type
+  pitch_summary <- full_data %>%
+    mutate(PitcherId = as.character(full_data$PitcherId)) %>%
+    group_by(PitcherId, TaggedPitchType, PitcherTeam, Season) %>%
+    summarise(
+      n_pitches = n(),
+      avg_actual_rv = mean(ActualRunValue, na.rm = TRUE),
+      avg_expected_rv = mean(xRunValue, na.rm = TRUE),
+      .groups = "drop"
+    )
+  
+  cat(sprintf("Total pitcher-pitch type combinations: %d\n", nrow(pitch_summary)))
+  cat(sprintf("Total pitches scored: %d\n", sum(pitch_summary$n_pitches)))
+  
+  # Apply SAME league-wide normalization to all pitch types
+  pitch_summary <- pitch_summary %>%
+    mutate(
+      # Use the OVERALL league mean and SD for all pitch types
+      z_score = (avg_expected_rv - league_mean) / league_sd,
+      stuff_plus = round(100 - (z_score * 10), 1),
+      percentile = round(percent_rank(stuff_plus) * 100, 1)
+    ) %>%
+    select(-z_score, -avg_actual_rv, -avg_expected_rv)
+  
+  # Join Pitcher and Team
+  pitch_summary <- pitch_summary %>%
+    left_join(pitcher_names, by = c("PitcherId", "PitcherTeam", "Season")) %>%
+    select(PitcherId, Pitcher, PitcherTeam, TaggedPitchType, Season, n_pitches, 
+           stuff_plus, percentile) %>%
+    arrange(Pitcher, TaggedPitchType)
+  
+  # Show pitch type averages
+  cat("\nAverage Stuff+ by Pitch Type:\n")
+  pitch_type_avg <- pitch_summary %>%
+    group_by(TaggedPitchType) %>%
+    summarise(
+      n_pitchers = n(),
+      avg_stuff_plus = round(mean(stuff_plus), 1),
+      .groups = "drop"
+    ) %>%
+    arrange(desc(avg_stuff_plus))
+  
+  print(pitch_type_avg)
+  
+  return(pitch_summary)
+}
+
+# Pipeline
+
+run_necbl_stuff_plus_no_threshold <- function() {
+  cat("NECBL Stuff+ Pipeline\n")
+  cat("=====================================================\n")
+  
+  # Load data
+  cat("Loading data from pipeline output...\n")
+  df <- readRDS("necbl_clean_2025-09-02.rds")
+  
+  # Prepare data
+  df <- prepare_stuff_data(df)
+  
+  # Build model
+  model_results <- build_stuff_plus_model(df)
+  
+  # Calculate overall Stuff+
+  overall_summary <- calculate_stuff_plus(model_results)
+  
+  # Calculate pitch-type specific Stuff+
+  pitch_summary <- calculate_stuff_plus_by_pitch(model_results)
+  
+  # Save RDS files (Solely Final Scores)
+  saveRDS(overall_summary, "necbl_stuff_plus_overall_2025-09-05.rds")
+  saveRDS(pitch_summary, "necbl_stuff_plus_by_pitch_type_2025-09-05.rds")
+  
+  cat("\n\nPipeline complete! Results saved.\n")
+  cat("Files saved:\n")
+  cat("  - necbl_stuff_plus_overall_2025-09-05.rds (Overall Stuff+ scores)\n")
+  cat("  - necbl_stuff_plus_by_pitch_type_2025-09-05.rds (Pitch-specific Stuff+ scores)\n")
+  
+  # Display summary statistics
+  cat("\n========================================\n")
+  cat("OVERALL STUFF+ SUMMARY (ALL PITCHES)\n")
+  cat("========================================\n")
+  cat(sprintf("Total pitchers: %d\n", nrow(overall_summary)))
+  cat(sprintf("Average pitches per pitcher: %.1f\n", mean(overall_summary$n_pitches)))
+  cat("\nTop 10 Overall:\n")
+  print(head(overall_summary %>% arrange(desc(stuff_plus)), 10))
+  
+  cat("\n========================================\n")
+  cat("PITCH-TYPE SPECIFIC SUMMARY\n")
+  cat("========================================\n")
+  
+  # Show best pitch of each type
+  cat("\nBest Pitch by Type (min 10 pitches):\n")
+  best_by_type <- pitch_summary %>%
+    group_by(TaggedPitchType) %>%
+    filter(n_pitches >= 10) %>%
+    slice_max(stuff_plus, n = 1) %>%
+    ungroup()
+  
+  for(i in 1:nrow(best_by_type)) {
+    cat(sprintf("  Best %s: %s (%.1f)\n",
+                best_by_type$TaggedPitchType[i],
+                best_by_type$Pitcher[i],
+                best_by_type$stuff_plus[i]))
+  }
+  
+  return(list(
+    overall = overall_summary,
+    by_pitch = pitch_summary,
+    model = model_results$model
+  ))
+}
+
+# Execute the pipeline
+results <- run_necbl_stuff_plus_no_threshold()
