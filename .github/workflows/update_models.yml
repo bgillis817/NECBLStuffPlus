@@ -1,0 +1,102 @@
+name: Update NECBL Pitching Models
+
+on:
+  schedule:
+    - cron: '0 10 * * *'  # Daily 10:00 AM UTC = 6:00 AM ET
+  workflow_dispatch:       # Allows manual trigger from the Actions tab
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+
+    steps:
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up R
+        uses: r-lib/actions/setup-r@v2
+        with:
+          r-version: '4.3.3'
+
+      - name: Install system libraries
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y \
+            libcurl4-openssl-dev \
+            libssl-dev \
+            libxml2-dev \
+            libfontconfig1-dev \
+            libharfbuzz-dev \
+            libfribidi-dev \
+            libfreetype6-dev \
+            libpng-dev \
+            libtiff5-dev \
+            libjpeg-dev
+
+      - name: Install R packages
+        run: |
+          Rscript -e "
+            install.packages(
+              c('tidyverse','randomForest','caret','Metrics',
+                'data.table','ggplot2','googledrive','gargle',
+                'bit64','rsconnect'),
+              repos  = 'https://cloud.r-project.org',
+              Ncpus  = 2
+            )
+          "
+
+      - name: Write Google service account key to file
+        env:
+          GDRIVE_SERVICE_ACCOUNT_JSON: ${{ secrets.GDRIVE_SERVICE_ACCOUNT_JSON }}
+        run: echo "$GDRIVE_SERVICE_ACCOUNT_JSON" > gdrive_key.json
+
+      - name: Run pipeline (Google Drive -> cleaned RDS)
+        env:
+          GDRIVE_KEY_PATH: gdrive_key.json
+        run: Rscript pipeline_cleaning.R
+
+      - name: Remove service account key file
+        if: always()
+        run: rm -f gdrive_key.json
+
+      - name: Run Stuff+ model
+        run: Rscript stuff_plus.R
+
+      - name: Run Location+ model
+        run: Rscript location_plus.R
+
+      - name: Run Pitching+ model
+        run: Rscript pitching_plus.R
+
+      - name: Deploy to shinyapps.io
+        env:
+          SHINYAPPS_ACCOUNT: ${{ secrets.SHINYAPPS_ACCOUNT }}
+          SHINYAPPS_TOKEN:   ${{ secrets.SHINYAPPS_TOKEN }}
+          SHINYAPPS_SECRET:  ${{ secrets.SHINYAPPS_SECRET }}
+        run: |
+          Rscript -e "
+            rsconnect::setAccountInfo(
+              name   = Sys.getenv('SHINYAPPS_ACCOUNT'),
+              token  = Sys.getenv('SHINYAPPS_TOKEN'),
+              secret = Sys.getenv('SHINYAPPS_SECRET')
+            )
+            rsconnect::deployApp(appDir = '.', forceUpdate = TRUE)
+          "
+
+      - name: Commit updated RDS files
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add \
+            necbl_clean_*.rds \
+            necbl_stuff_plus_overall_*.rds \
+            necbl_stuff_plus_by_pitch_type_*.rds \
+            necbl_location_plus_overall_*.rds \
+            necbl_location_plus_by_pitch_type_*.rds \
+            necbl_pitching_plus_overall_*.rds \
+            necbl_pitching_plus_by_pitch_type_*.rds
+          git diff --staged --quiet || \
+            git commit -m "Auto-update: models $(date +'%Y-%m-%d')"
+          git push
