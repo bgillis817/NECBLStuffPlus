@@ -32,6 +32,23 @@ jobs:
           sudo R -e "install.packages('bit64', repos='https://cloud.r-project.org')"
           sudo R -e "install.packages('rsconnect', repos='https://cloud.r-project.org')"
 
+      - name: Diagnose library paths
+        run: |
+          echo "=== which R ==="
+          which R
+          which Rscript
+          echo "=== R version ==="
+          R --version | head -1
+          Rscript --version
+          echo "=== sudo Rscript libPaths ==="
+          sudo Rscript -e ".libPaths()"
+          echo "=== sudo R libPaths ==="
+          sudo R -e ".libPaths()"
+          echo "=== tidyverse location ==="
+          sudo R -e "find.package('tidyverse')"
+          echo "=== sudo Rscript tidyverse ==="
+          sudo Rscript -e "find.package('tidyverse')"
+
       - name: Write Google service account key to file
         env:
           GDRIVE_SERVICE_ACCOUNT_JSON: ${{ secrets.GDRIVE_SERVICE_ACCOUNT_JSON }}
