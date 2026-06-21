@@ -1,6 +1,5 @@
 .libPaths(c('/usr/local/lib/R/site-library', .libPaths()))
 
-# Load all packages
 library(tidyverse)
 library(randomForest)
 library(caret)
