@@ -74,6 +74,12 @@ combine_navs_csvs <- function(folder_path = "Navs CSVs", use_google_drive = TRUE
 
   cat("\nCombining", length(all_data_list), "dataframes...\n")
 
+  # Convert all columns to character before binding to avoid type mismatches
+  all_data_list <- lapply(all_data_list, function(df) {
+    df[] <- lapply(df, as.character)
+    df
+  })
+
   combined_data <- data.table::rbindlist(all_data_list,
                                           use.names = TRUE,
                                           fill = TRUE,
