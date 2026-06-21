@@ -15,39 +15,22 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Install R and packages
+      - name: Install R and system dependencies
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y r-base r-base-dev \
+          sudo apt-get install -y \
+            r-base r-base-dev \
+            r-cran-tidyverse \
+            r-cran-randomforest \
+            r-cran-caret \
+            r-cran-data.table \
             libcurl4-openssl-dev libssl-dev libxml2-dev \
             libfontconfig1-dev libharfbuzz-dev libfribidi-dev \
             libfreetype6-dev libpng-dev libtiff5-dev libjpeg-dev
-          sudo R -e "install.packages('tidyverse', repos='https://cloud.r-project.org')"
-          sudo R -e "install.packages('randomForest', repos='https://cloud.r-project.org')"
-          sudo R -e "install.packages('caret', repos='https://cloud.r-project.org')"
-          sudo R -e "install.packages('Metrics', repos='https://cloud.r-project.org')"
-          sudo R -e "install.packages('data.table', repos='https://cloud.r-project.org')"
-          sudo R -e "install.packages('googledrive', repos='https://cloud.r-project.org')"
-          sudo R -e "install.packages('gargle', repos='https://cloud.r-project.org')"
-          sudo R -e "install.packages('bit64', repos='https://cloud.r-project.org')"
-          sudo R -e "install.packages('rsconnect', repos='https://cloud.r-project.org')"
 
-      - name: Diagnose library paths
+      - name: Install remaining R packages
         run: |
-          echo "=== which R ==="
-          which R
-          which Rscript
-          echo "=== R version ==="
-          R --version | head -1
-          Rscript --version
-          echo "=== sudo Rscript libPaths ==="
-          sudo Rscript -e ".libPaths()"
-          echo "=== sudo R libPaths ==="
-          sudo R -e ".libPaths()"
-          echo "=== tidyverse location ==="
-          sudo R -e "find.package('tidyverse')"
-          echo "=== sudo Rscript tidyverse ==="
-          sudo Rscript -e "find.package('tidyverse')"
+          sudo R -e "install.packages(c('Metrics','googledrive','gargle','bit64','rsconnect'), repos='https://cloud.r-project.org')"
 
       - name: Write Google service account key to file
         env:
