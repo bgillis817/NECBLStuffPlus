@@ -3,7 +3,7 @@ name: Update NECBL Pitching Models
 on:
   schedule:
     - cron: '0 10 * * *'  # Daily 10:00 AM UTC = 6:00 AM ET
-  workflow_dispatch:       # Allows manual trigger from the Actions tab
+  workflow_dispatch:
 
 jobs:
   update:
@@ -37,13 +37,12 @@ jobs:
 
       - name: Install R packages
         run: |
-          Rscript -e "
+          sudo Rscript -e "
             install.packages(
               c('tidyverse','randomForest','caret','Metrics',
                 'data.table','ggplot2','googledrive','gargle',
                 'bit64','rsconnect'),
               repos = 'https://cloud.r-project.org',
-              lib   = Sys.getenv('R_LIBS_USER'),
               Ncpus = 2
             )
           "
@@ -77,7 +76,7 @@ jobs:
           SHINYAPPS_TOKEN:   ${{ secrets.SHINYAPPS_TOKEN }}
           SHINYAPPS_SECRET:  ${{ secrets.SHINYAPPS_SECRET }}
         run: |
-          Rscript -e "
+          sudo Rscript -e "
             rsconnect::setAccountInfo(
               name   = Sys.getenv('SHINYAPPS_ACCOUNT'),
               token  = Sys.getenv('SHINYAPPS_TOKEN'),
