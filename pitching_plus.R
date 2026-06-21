@@ -1,3 +1,5 @@
+.libPaths(c('/usr/local/lib/R/site-library', .libPaths()))
+
 library(tidyverse)
 library(randomForest)
 library(caret)
@@ -18,9 +20,7 @@ prepare_necbl_data <- function(df) {
       mutate(Date = as.Date(Date, format = "%m/%d/%Y"), Season = as.character(format(Date, "%Y")))
     cat("Seasons found:", paste(unique(df$Season), collapse = ", "), "\n")
   } else {
-    # ── CHANGED: updated fallback season from 2025 to 2026 ──────────────────
     df$Season <- "2026"
-    # ────────────────────────────────────────────────────────────────────────
     cat("No Date column found - defaulting to 2026 season\n")
   }
 
@@ -299,28 +299,21 @@ run_necbl_pitching_plus_no_threshold <- function() {
   cat("NECBL Pitching+ Pipeline\n")
   cat("========================================================\n")
 
-  # ── CHANGED (1 of 2) ──────────────────────────────────────────────────────
-  # Original: df <- readRDS("necbl_clean_2025-09-02.rds")
   rds_files <- list.files(pattern = "^necbl_clean_.*\\.rds$")
   if (length(rds_files) == 0) stop("No necbl_clean_*.rds file found. Run pipeline_cleaning.R first.")
   latest_rds <- tail(sort(rds_files), 1)
   cat("Loading data from:", latest_rds, "\n")
   df <- readRDS(latest_rds)
-  # ──────────────────────────────────────────────────────────────────────────
 
   df              <- prepare_necbl_data(df)
   model_results   <- build_pitching_plus_model(df)
   overall_summary <- calculate_pitching_plus(model_results)
   pitch_summary   <- calculate_pitching_plus_by_pitch(model_results)
 
-  # ── CHANGED (2 of 2) ──────────────────────────────────────────────────────
-  # Original: saveRDS(overall_summary, "necbl_pitching_plus_overall_2025-09-05.rds")
-  #           saveRDS(pitch_summary,   "necbl_pitching_plus_by_pitch_type_2025-09-05.rds")
   saveRDS(overall_summary, paste0("necbl_pitching_plus_overall_",       Sys.Date(), ".rds"))
   saveRDS(pitch_summary,   paste0("necbl_pitching_plus_by_pitch_type_", Sys.Date(), ".rds"))
-  # ──────────────────────────────────────────────────────────────────────────
 
-  cat("\n\nPipeline complete! Results saved.\n")
+  cat("\n\nPipeline complete!\n")
   cat(sprintf(" - necbl_pitching_plus_overall_%s.rds\n",       Sys.Date()))
   cat(sprintf(" - necbl_pitching_plus_by_pitch_type_%s.rds\n", Sys.Date()))
 
