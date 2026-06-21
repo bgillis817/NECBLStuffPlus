@@ -40,20 +40,20 @@ jobs:
       - name: Run pipeline (Google Drive -> cleaned RDS)
         env:
           GDRIVE_KEY_PATH: gdrive_key.json
-        run: sudo Rscript pipeline_cleaning.R
+        run: sudo -E Rscript pipeline_cleaning.R
 
       - name: Remove service account key file
         if: always()
         run: rm -f gdrive_key.json
 
       - name: Run Stuff+ model
-        run: sudo Rscript stuff_plus.R
+        run: sudo -E Rscript stuff_plus.R
 
       - name: Run Location+ model
-        run: sudo Rscript location_plus.R
+        run: sudo -E Rscript location_plus.R
 
       - name: Run Pitching+ model
-        run: sudo Rscript pitching_plus.R
+        run: sudo -E Rscript pitching_plus.R
 
       - name: Deploy to shinyapps.io
         env:
@@ -61,7 +61,7 @@ jobs:
           SHINYAPPS_TOKEN:   ${{ secrets.SHINYAPPS_TOKEN }}
           SHINYAPPS_SECRET:  ${{ secrets.SHINYAPPS_SECRET }}
         run: |
-          sudo Rscript -e "
+          sudo -E Rscript -e "
             rsconnect::setAccountInfo(
               name   = Sys.getenv('SHINYAPPS_ACCOUNT'),
               token  = Sys.getenv('SHINYAPPS_TOKEN'),
