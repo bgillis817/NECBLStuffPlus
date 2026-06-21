@@ -42,8 +42,9 @@ jobs:
               c('tidyverse','randomForest','caret','Metrics',
                 'data.table','ggplot2','googledrive','gargle',
                 'bit64','rsconnect'),
-              repos  = 'https://cloud.r-project.org',
-              Ncpus  = 2
+              repos = 'https://cloud.r-project.org',
+              lib   = Sys.getenv('R_LIBS_USER'),
+              Ncpus = 2
             )
           "
 
