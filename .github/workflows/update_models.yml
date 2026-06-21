@@ -15,32 +15,22 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Install R
+      - name: Install R and packages
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y r-base r-base-dev \
-            libcurl4-openssl-dev \
-            libssl-dev \
-            libxml2-dev \
-            libfontconfig1-dev \
-            libharfbuzz-dev \
-            libfribidi-dev \
-            libfreetype6-dev \
-            libpng-dev \
-            libtiff5-dev \
-            libjpeg-dev
-
-      - name: Install R packages
-        run: |
-          sudo Rscript -e "
-            install.packages(
-              c('tidyverse','randomForest','caret','Metrics',
-                'data.table','ggplot2','googledrive','gargle',
-                'bit64','rsconnect'),
-              repos = 'https://cloud.r-project.org',
-              Ncpus = 2
-            )
-          "
+            libcurl4-openssl-dev libssl-dev libxml2-dev \
+            libfontconfig1-dev libharfbuzz-dev libfribidi-dev \
+            libfreetype6-dev libpng-dev libtiff5-dev libjpeg-dev
+          sudo R -e "install.packages('tidyverse', repos='https://cloud.r-project.org')"
+          sudo R -e "install.packages('randomForest', repos='https://cloud.r-project.org')"
+          sudo R -e "install.packages('caret', repos='https://cloud.r-project.org')"
+          sudo R -e "install.packages('Metrics', repos='https://cloud.r-project.org')"
+          sudo R -e "install.packages('data.table', repos='https://cloud.r-project.org')"
+          sudo R -e "install.packages('googledrive', repos='https://cloud.r-project.org')"
+          sudo R -e "install.packages('gargle', repos='https://cloud.r-project.org')"
+          sudo R -e "install.packages('bit64', repos='https://cloud.r-project.org')"
+          sudo R -e "install.packages('rsconnect', repos='https://cloud.r-project.org')"
 
       - name: Write Google service account key to file
         env:
