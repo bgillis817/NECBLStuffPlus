@@ -1,3 +1,5 @@
+.libPaths(c('/usr/local/lib/R/site-library', .libPaths()))
+
 library(tidyverse)
 library(randomForest)
 library(caret)
@@ -24,9 +26,7 @@ prepare_stuff_data <- function(df) {
       )
     cat("Seasons found in data:", paste(unique(df$Season), collapse = ", "), "\n")
   } else {
-    # ── CHANGED: updated fallback season from 2025 to 2026 ──────────────────
     df$Season <- "2026"
-    # ────────────────────────────────────────────────────────────────────────
     cat("No Date column found - defaulting to 2026 season\n")
   }
 
@@ -114,8 +114,8 @@ build_stuff_plus_model <- function(df) {
   train <- df[train_index, ]
   vali  <- df[-train_index, ]
 
-  cat(sprintf("Training set (for model building): %d pitches\n", nrow(train)))
-  cat(sprintf("Validation set (for model evaluation): %d pitches\n\n", nrow(vali)))
+  cat(sprintf("Training set: %d pitches\n", nrow(train)))
+  cat(sprintf("Validation set: %d pitches\n\n", nrow(vali)))
 
   model_formula <- as.formula("PitchCall ~ RelSpeed + SpinRate + InducedVertBreak + HorzBreak + Extension + RelHeight + RelSide")
 
@@ -140,7 +140,7 @@ build_stuff_plus_model <- function(df) {
 
   cat("\nApplying model to entire dataset...\n")
   rf_prob_all <- predict(rf_model, newdata = df, type = "prob")
-  cat(sprintf("Scored all %d pitches in dataset\n", nrow(df)))
+  cat(sprintf("Scored all %d pitches\n", nrow(df)))
 
   return(list(
     model         = rf_model,
@@ -154,18 +154,9 @@ build_stuff_plus_model <- function(df) {
 calculate_run_values <- function(prob_df, strikes) {
 
   weights <- list(
-    ball_01   =  0.056,
-    strike_01 = -0.089,
-    foul_01   = -0.089,
-    ball_2    =  0.056,
-    strike_2  = -0.089,
-    foul_2    =  0,
-    out       = -0.26,
-    single    =  0.44,
-    double    =  0.75,
-    triple    =  1.01,
-    homerun   =  1.40,
-    hbp       =  0.31
+    ball_01   =  0.056, strike_01 = -0.089, foul_01 = -0.089,
+    ball_2    =  0.056, strike_2  = -0.089, foul_2  =  0,
+    out = -0.26, single = 0.44, double = 0.75, triple = 1.01, homerun = 1.40, hbp = 0.31
   )
 
   n <- nrow(prob_df)
@@ -334,28 +325,21 @@ run_necbl_stuff_plus_no_threshold <- function() {
   cat("NECBL Stuff+ Pipeline\n")
   cat("=====================================================\n")
 
-  # ── CHANGED (1 of 2) ──────────────────────────────────────────────────────
-  # Original: df <- readRDS("necbl_clean_2025-09-02.rds")
   rds_files <- list.files(pattern = "^necbl_clean_.*\\.rds$")
   if (length(rds_files) == 0) stop("No necbl_clean_*.rds file found. Run pipeline_cleaning.R first.")
   latest_rds <- tail(sort(rds_files), 1)
   cat("Loading data from:", latest_rds, "\n")
   df <- readRDS(latest_rds)
-  # ──────────────────────────────────────────────────────────────────────────
 
   df              <- prepare_stuff_data(df)
   model_results   <- build_stuff_plus_model(df)
   overall_summary <- calculate_stuff_plus(model_results)
   pitch_summary   <- calculate_stuff_plus_by_pitch(model_results)
 
-  # ── CHANGED (2 of 2) ──────────────────────────────────────────────────────
-  # Original: saveRDS(overall_summary, "necbl_stuff_plus_overall_2025-09-05.rds")
-  #           saveRDS(pitch_summary,   "necbl_stuff_plus_by_pitch_type_2025-09-05.rds")
   saveRDS(overall_summary, paste0("necbl_stuff_plus_overall_",       Sys.Date(), ".rds"))
   saveRDS(pitch_summary,   paste0("necbl_stuff_plus_by_pitch_type_", Sys.Date(), ".rds"))
-  # ──────────────────────────────────────────────────────────────────────────
 
-  cat("\n\nPipeline complete! Results saved.\n")
+  cat("\n\nPipeline complete!\n")
   cat(sprintf(" - necbl_stuff_plus_overall_%s.rds\n",       Sys.Date()))
   cat(sprintf(" - necbl_stuff_plus_by_pitch_type_%s.rds\n", Sys.Date()))
 
