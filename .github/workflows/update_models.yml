@@ -2,7 +2,7 @@ name: Update NECBL Pitching Models
 
 on:
   schedule:
-    - cron: '0 10 * * *'  # Daily 10:00 AM UTC = 6:00 AM ET
+    - cron: '0 10 * * *'
   workflow_dispatch:
 
 jobs:
@@ -15,15 +15,10 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Set up R
-        uses: r-lib/actions/setup-r@v2
-        with:
-          r-version: '4.3.3'
-
-      - name: Install system libraries
+      - name: Install R
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y \
+          sudo apt-get install -y r-base r-base-dev \
             libcurl4-openssl-dev \
             libssl-dev \
             libxml2-dev \
@@ -55,20 +50,20 @@ jobs:
       - name: Run pipeline (Google Drive -> cleaned RDS)
         env:
           GDRIVE_KEY_PATH: gdrive_key.json
-        run: Rscript pipeline_cleaning.R
+        run: sudo Rscript pipeline_cleaning.R
 
       - name: Remove service account key file
         if: always()
         run: rm -f gdrive_key.json
 
       - name: Run Stuff+ model
-        run: Rscript stuff_plus.R
+        run: sudo Rscript stuff_plus.R
 
       - name: Run Location+ model
-        run: Rscript location_plus.R
+        run: sudo Rscript location_plus.R
 
       - name: Run Pitching+ model
-        run: Rscript pitching_plus.R
+        run: sudo Rscript pitching_plus.R
 
       - name: Deploy to shinyapps.io
         env:
