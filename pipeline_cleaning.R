@@ -1,3 +1,5 @@
+.libPaths(c('/usr/local/lib/R/site-library', .libPaths()))
+
 # Load all packages
 library(tidyverse)
 library(randomForest)
@@ -7,17 +9,9 @@ library(data.table)
 library(ggplot2)
 library(googledrive)
 
-# ── CHANGED (1 of 2) ──────────────────────────────────────────────────────────
-# Original: drive_auth(cache = ".secrets", email = TRUE)
-# Reason:   OAuth tokens are interactive; Actions runner has no browser.
-#           The workflow writes the JSON secret to gdrive_key.json at runtime.
 drive_auth(path = Sys.getenv("GDRIVE_KEY_PATH"))
-# ──────────────────────────────────────────────────────────────────────────────
 
 
-# ==========================================
-# Data combination from drive folder
-# ==========================================
 combine_navs_csvs <- function(folder_path = "Navs CSVs", use_google_drive = TRUE) {
 
   cat("========================================\n")
@@ -95,9 +89,6 @@ combine_navs_csvs <- function(folder_path = "Navs CSVs", use_google_drive = TRUE
 }
 
 
-# ==========================================
-# Data Cleaning
-# ==========================================
 clean_all_data <- function(df) {
 
   cat("Cleaning Data \n")
@@ -219,9 +210,6 @@ clean_all_data <- function(df) {
 }
 
 
-# ==========================================
-# Continue Filtering
-# ==========================================
 filter_core_metrics <- function(df) {
 
   cat("\nFiltering for velo, spin, IVB, and HB\n")
@@ -247,9 +235,6 @@ assess_final_quality <- function(df) {
 }
 
 
-# ==========================================
-# Main Pipeline
-# ==========================================
 run_necbl_pipeline <- function(folder_path = "Navs CSVs", save_to_file = TRUE) {
 
   cat("STEP 1: Combining all CSV files\n")
@@ -267,10 +252,7 @@ run_necbl_pipeline <- function(folder_path = "Navs CSVs", save_to_file = TRUE) {
   assess_final_quality(combined_data)
 
   if (save_to_file) {
-    # ── CHANGED (2 of 2) ──────────────────────────────────────────────────────
-    # Original: hardcoded filename like "necbl_clean_2025-09-02.rds"
     rds_file <- paste0("necbl_clean_", Sys.Date(), ".rds")
-    # ──────────────────────────────────────────────────────────────────────────
     saveRDS(combined_data, rds_file, compress = TRUE)
     cat("Saved:", rds_file, "\n")
 
@@ -290,9 +272,6 @@ run_necbl_pipeline <- function(folder_path = "Navs CSVs", save_to_file = TRUE) {
 }
 
 
-# ==========================================
-# Execute pipeline
-# ==========================================
 necbl_data <- run_necbl_pipeline(
   folder_path  = "Navs CSVs",
   save_to_file = TRUE
