@@ -8,6 +8,19 @@ library(bit64)
 
 set.seed(42)
 
+# Flexible date parser - handles multiple formats automatically
+parse_flexible_date <- function(x) {
+  x <- as.character(x)
+  parsed <- as.Date(rep(NA, length(x)))
+  fmts <- c("%Y-%m-%d", "%m/%d/%Y", "%m/%d/%y", "%Y/%m/%d", "%d-%m-%Y")
+  for (f in fmts) {
+    na_idx <- is.na(parsed)
+    if (!any(na_idx)) break
+    parsed[na_idx] <- as.Date(x[na_idx], format = f)
+  }
+  parsed
+}
+
 prepare_stuff_data <- function(df) {
 
   cat("NECBL Stuff+ Data Preparation \n")
@@ -21,7 +34,7 @@ prepare_stuff_data <- function(df) {
   if ("Date" %in% names(df)) {
     df <- df %>%
       mutate(
-        Date   = as.Date(Date, format = "%m/%d/%Y"),
+        Date   = parse_flexible_date(Date),
         Season = as.character(format(Date, "%Y"))
       )
     cat("Seasons found in data:", paste(unique(df$Season), collapse = ", "), "\n")
@@ -340,9 +353,6 @@ run_necbl_stuff_plus_no_threshold <- function() {
   saveRDS(pitch_summary,   paste0("necbl_stuff_plus_by_pitch_type_", Sys.Date(), ".rds"))
 
   cat("\n\nPipeline complete!\n")
-  cat(sprintf(" - necbl_stuff_plus_overall_%s.rds\n",       Sys.Date()))
-  cat(sprintf(" - necbl_stuff_plus_by_pitch_type_%s.rds\n", Sys.Date()))
-
   cat("\nTop 10 Overall:\n")
   print(head(overall_summary %>% arrange(desc(stuff_plus)), 10))
 
