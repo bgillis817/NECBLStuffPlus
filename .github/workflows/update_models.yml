@@ -30,7 +30,7 @@ jobs:
 
       - name: Install remaining R packages
         run: |
-          sudo R -e "install.packages(c('Metrics','googledrive','gargle','bit64','rsconnect'), repos='https://cloud.r-project.org')"
+          sudo R -e "install.packages(c('Metrics','googledrive','gargle','bit64','rsconnect','shiny','shinydashboard','DT','plotly','curl','tidyr'), repos='https://cloud.r-project.org')"
 
       - name: Write Google service account key to file
         env:
@@ -67,7 +67,7 @@ jobs:
               token  = Sys.getenv('SHINYAPPS_TOKEN'),
               secret = Sys.getenv('SHINYAPPS_SECRET')
             )
-            rsconnect::deployApp(appDir = '.', forceUpdate = TRUE)
+            rsconnect::deployApp(appDir = '.', appName = 'necblpitchingplusmodel', forceUpdate = TRUE)
           "
 
       - name: Commit updated RDS files
