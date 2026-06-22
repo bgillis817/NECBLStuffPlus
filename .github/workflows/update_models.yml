@@ -32,6 +32,16 @@ jobs:
         run: |
           sudo R -e "install.packages(c('Metrics','googledrive','gargle','bit64','rsconnect','shiny','shinydashboard','DT','plotly','curl','tidyr'), repos='https://cloud.r-project.org')"
 
+      - name: Delete old RDS files
+        run: |
+          rm -f necbl_clean_*.rds
+          rm -f necbl_stuff_plus_overall_*.rds
+          rm -f necbl_stuff_plus_by_pitch_type_*.rds
+          rm -f necbl_location_plus_overall_*.rds
+          rm -f necbl_location_plus_by_pitch_type_*.rds
+          rm -f necbl_pitching_plus_overall_*.rds
+          rm -f necbl_pitching_plus_by_pitch_type_*.rds
+
       - name: Write Google service account key to file
         env:
           GDRIVE_SERVICE_ACCOUNT_JSON: ${{ secrets.GDRIVE_SERVICE_ACCOUNT_JSON }}
@@ -74,14 +84,7 @@ jobs:
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add \
-            necbl_clean_*.rds \
-            necbl_stuff_plus_overall_*.rds \
-            necbl_stuff_plus_by_pitch_type_*.rds \
-            necbl_location_plus_overall_*.rds \
-            necbl_location_plus_by_pitch_type_*.rds \
-            necbl_pitching_plus_overall_*.rds \
-            necbl_pitching_plus_by_pitch_type_*.rds
+          git add -A
           git diff --staged --quiet || \
             git commit -m "Auto-update: models $(date +'%Y-%m-%d')"
           git push
