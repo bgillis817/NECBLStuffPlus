@@ -1,0 +1,13 @@
+# Large cleaned training dataset — regenerated from Google Drive every run,
+# consumed only by the model scripts within the same job. Never needed in the
+# repo (the deployed app reads only the small model .rds files) and exceeds
+# GitHub's 100 MB file limit.
+necbl_clean_*.rds
+
+# Service account key written at runtime
+gdrive_key.json
+
+# R session cruft
+.Rproj.user/
+.Rhistory
+.RData
