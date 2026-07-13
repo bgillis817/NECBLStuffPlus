@@ -92,4 +92,6 @@ jobs:
           git add -A
           git diff --staged --quiet || \
             git commit -m "Auto-update: models $(date +'%Y-%m-%d')"
+          # Bring in anything that landed on main while the job ran, then push.
+          git pull --rebase --autostash origin main || true
           git push
