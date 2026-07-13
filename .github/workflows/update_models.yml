@@ -65,6 +65,11 @@ jobs:
       - name: Run Pitching+ model
         run: sudo -E Rscript pitching_plus.R
 
+      - name: Drop throwaway cleaned dataset (regenerated every run; not used by the app)
+        run: |
+          sudo rm -f necbl_clean_*.rds
+          git rm --cached --ignore-unmatch necbl_clean_*.rds || true
+
       - name: Deploy to shinyapps.io
         env:
           SHINYAPPS_ACCOUNT: ${{ secrets.SHINYAPPS_ACCOUNT }}
